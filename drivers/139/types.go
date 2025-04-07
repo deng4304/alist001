@@ -1,8 +1,13 @@
 package _139
 
+import (
+	"encoding/xml"
+)
+
 const (
 	MetaPersonal    string = "personal"
 	MetaFamily      string = "family"
+	MetaGroup       string = "group"
 	MetaPersonalNew string = "personal_new"
 )
 
@@ -50,6 +55,7 @@ type Content struct {
 	//ContentDesc     string      `json:"contentDesc"`
 	//ContentType     int         `json:"contentType"`
 	//ContentOrigin   int         `json:"contentOrigin"`
+	CreateTime string `json:"createTime"`
 	UpdateTime string `json:"updateTime"`
 	//CommentCount    int         `json:"commentCount"`
 	ThumbnailURL string `json:"thumbnailURL"`
@@ -137,6 +143,13 @@ type UploadResp struct {
 	} `json:"data"`
 }
 
+type InterLayerUploadResult struct {
+	XMLName    xml.Name `xml:"result"`
+	Text       string   `xml:",chardata"`
+	ResultCode int      `xml:"resultCode"`
+	Msg        string   `xml:"msg"`
+}
+
 type CloudContent struct {
 	ContentID string `json:"contentID"`
 	//Modifier         string      `json:"modifier"`
@@ -192,6 +205,37 @@ type QueryContentListResp struct {
 	} `json:"data"`
 }
 
+type QueryGroupContentListResp struct {
+	BaseResp
+	Data struct {
+		Result struct {
+			ResultCode string `json:"resultCode"`
+			ResultDesc string `json:"resultDesc"`
+		} `json:"result"`
+		GetGroupContentResult struct {
+			ParentCatalogID string `json:"parentCatalogID"` // 根目录是"0"
+			CatalogList     []struct {
+				Catalog
+				Path string `json:"path"`
+			} `json:"catalogList"`
+			ContentList []Content `json:"contentList"`
+			NodeCount   int       `json:"nodeCount"` // 文件+文件夹数量
+			CtlgCnt     int       `json:"ctlgCnt"`   // 文件夹数量
+			ContCnt     int       `json:"contCnt"`   // 文件数量
+		} `json:"getGroupContentResult"`
+	} `json:"data"`
+}
+
+type ParallelHashCtx struct {
+	PartOffset int64 `json:"partOffset"`
+}
+
+type PartInfo struct {
+	PartNumber      int64           `json:"partNumber"`
+	PartSize        int64           `json:"partSize"`
+	ParallelHashCtx ParallelHashCtx `json:"parallelHashCtx"`
+}
+
 type PersonalThumbnail struct {
 	Style string `json:"style"`
 	Url   string `json:"url"`
@@ -224,9 +268,28 @@ type PersonalUploadResp struct {
 	BaseResp
 	Data struct {
 		FileId      string             `json:"fileId"`
+		FileName    string             `json:"fileName"`
 		PartInfos   []PersonalPartInfo `json:"partInfos"`
 		Exist       bool               `json:"exist"`
 		RapidUpload bool               `json:"rapidUpload"`
 		UploadId    string             `json:"uploadId"`
 	}
+}
+
+type PersonalUploadUrlResp struct {
+	BaseResp
+	Data struct {
+		FileId    string             `json:"fileId"`
+		UploadId  string             `json:"uploadId"`
+		PartInfos []PersonalPartInfo `json:"partInfos"`
+	}
+}
+
+type RefreshTokenResp struct {
+	XMLName     xml.Name   `xml:"root"`
+	Return      string     `xml:"return"`
+	Token       string     `xml:"token"`
+	Expiretime  int32      `xml:"expiretime"`
+	AccessToken string     `xml:"accessToken"`
+	Desc        string     `xml:"desc"`
 }

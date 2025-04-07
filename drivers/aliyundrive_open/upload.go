@@ -77,7 +77,7 @@ func (d *AliyundriveOpen) uploadPart(ctx context.Context, r io.Reader, partInfo 
 	if err != nil {
 		return err
 	}
-	res.Body.Close()
+	_ = res.Body.Close()
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusConflict {
 		return fmt.Errorf("upload status: %d", res.StatusCode)
 	}
@@ -126,7 +126,7 @@ func getProofRange(input string, size int64) (*ProofRange, error) {
 }
 
 func (d *AliyundriveOpen) calProofCode(stream model.FileStreamer) (string, error) {
-	proofRange, err := getProofRange(d.AccessToken, stream.GetSize())
+	proofRange, err := getProofRange(d.getAccessToken(), stream.GetSize())
 	if err != nil {
 		return "", err
 	}
@@ -136,7 +136,7 @@ func (d *AliyundriveOpen) calProofCode(stream model.FileStreamer) (string, error
 	if err != nil {
 		return "", err
 	}
-	_, err = io.CopyN(buf, reader, length)
+	_, err = utils.CopyWithBufferN(buf, reader, length)
 	if err != nil {
 		return "", err
 	}
@@ -164,7 +164,7 @@ func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream m
 	count := int(math.Ceil(float64(stream.GetSize()) / float64(partSize)))
 	createData["part_info_list"] = makePartInfos(count)
 	// rapid upload
-	rapidUpload := stream.GetSize() > 100*utils.KB && d.RapidUpload
+	rapidUpload := !stream.IsForceStreamUpload() && stream.GetSize() > 100*utils.KB && d.RapidUpload
 	if rapidUpload {
 		log.Debugf("[aliyundrive_open] start cal pre_hash")
 		// read 1024 bytes to calculate pre hash
@@ -242,14 +242,18 @@ func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream m
 			if remain := stream.GetSize() - offset; length > remain {
 				length = remain
 			}
-			//rd := utils.NewMultiReadable(io.LimitReader(stream, partSize))
-			rd, err := stream.RangeRead(http_range.Range{Start: offset, Length: length})
-			if err != nil {
-				return nil, err
+			rd := utils.NewMultiReadable(io.LimitReader(stream, partSize))
+			if rapidUpload {
+				srd, err := stream.RangeRead(http_range.Range{Start: offset, Length: length})
+				if err != nil {
+					return nil, err
+				}
+				rd = utils.NewMultiReadable(srd)
 			}
 			err = retry.Do(func() error {
-				//rd.Reset()
-				return d.uploadPart(ctx, rd, createResp.PartInfoList[i])
+				_ = rd.Reset()
+				rateLimitedRd := driver.NewLimitedUploadStream(ctx, rd)
+				return d.uploadPart(ctx, rateLimitedRd, createResp.PartInfoList[i])
 			},
 				retry.Attempts(3),
 				retry.DelayType(retry.BackOffDelay),

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/alist-org/alist/v3/drivers/base"
 	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/alist-org/alist/v3/internal/op"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/alist-org/alist/v3/pkg/utils/random"
 	"github.com/go-resty/resty/v2"
@@ -52,6 +54,55 @@ func getTime(t string) time.Time {
 	return stamp
 }
 
+func (d *Yun139) refreshToken() error {
+	if d.ref != nil {
+		return d.ref.refreshToken()
+	}
+	decode, err := base64.StdEncoding.DecodeString(d.Authorization)
+	if err != nil {
+		return fmt.Errorf("authorization decode failed: %s", err)
+	}
+	decodeStr := string(decode)
+	splits := strings.Split(decodeStr, ":")
+	if len(splits) < 3 {
+		return fmt.Errorf("authorization is invalid, splits < 3")
+	}
+	strs := strings.Split(splits[2], "|")
+	if len(strs) < 4 {
+		return fmt.Errorf("authorization is invalid, strs < 4")
+	}
+	expiration, err := strconv.ParseInt(strs[3], 10, 64)
+	if err != nil {
+		return fmt.Errorf("authorization is invalid")
+	}
+	expiration -= time.Now().UnixMilli()
+	if expiration > 1000*60*60*24*15 {
+		// Authorization有效期大于15天无需刷新
+		return nil
+	}
+	if expiration < 0 {
+		return fmt.Errorf("authorization has expired")
+	}
+
+	url := "https://aas.caiyun.feixin.10086.cn:443/tellin/authTokenRefresh.do"
+	var resp RefreshTokenResp
+	reqBody := "<root><token>" + splits[2] + "</token><account>" + splits[1] + "</account><clienttype>656</clienttype></root>"
+	_, err = base.RestyClient.R().
+		ForceContentType("application/xml").
+		SetBody(reqBody).
+		SetResult(&resp).
+		Post(url)
+	if err != nil {
+		return err
+	}
+	if resp.Return != "0" {
+		return fmt.Errorf("failed to refresh token: %s", resp.Desc)
+	}
+	d.Authorization = base64.StdEncoding.EncodeToString([]byte(splits[0] + ":" + splits[1] + ":" + resp.Token))
+	op.MustSaveDriverStorage(d)
+	return nil
+}
+
 func (d *Yun139) request(pathname string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
 	url := "https://yun.139.com" + pathname
 	req := base.RestyClient.R()
@@ -72,21 +123,22 @@ func (d *Yun139) request(pathname string, method string, callback base.ReqCallba
 	req.SetHeaders(map[string]string{
 		"Accept":         "application/json, text/plain, */*",
 		"CMS-DEVICE":     "default",
-		"Authorization":  "Basic " + d.Authorization,
+		"Authorization":  "Basic " + d.getAuthorization(),
 		"mcloud-channel": "1000101",
 		"mcloud-client":  "10701",
 		//"mcloud-route": "001",
 		"mcloud-sign": fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
 		//"mcloud-skey":"",
-		"mcloud-version":      "6.6.0",
-		"Origin":              "https://yun.139.com",
-		"Referer":             "https://yun.139.com/w/",
-		"x-DeviceInfo":        "||9|6.6.0|chrome|95.0.4638.69|uwIy75obnsRPIwlJSd7D9GhUvFwG96ce||macos 10.15.2||zh-CN|||",
-		"x-huawei-channelSrc": "10000034",
-		"x-inner-ntwk":        "2",
-		"x-m4c-caller":        "PC",
-		"x-m4c-src":           "10002",
-		"x-SvcType":           svcType,
+		"mcloud-version":         "7.14.0",
+		"Origin":                 "https://yun.139.com",
+		"Referer":                "https://yun.139.com/w/",
+		"x-DeviceInfo":           "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
+		"x-huawei-channelSrc":    "10000034",
+		"x-inner-ntwk":           "2",
+		"x-m4c-caller":           "PC",
+		"x-m4c-src":              "10002",
+		"x-SvcType":              svcType,
+		"Inner-Hcy-Router-Https": "1",
 	})
 
 	var e BaseResp
@@ -124,7 +176,7 @@ func (d *Yun139) getFiles(catalogID string) ([]model.Obj, error) {
 			"catalogSortType": 0,
 			"contentSortType": 0,
 			"commonAccountInfo": base.Json{
-				"account":     d.Account,
+				"account":     d.getAccount(),
 				"accountType": 1,
 			},
 		}
@@ -172,7 +224,7 @@ func (d *Yun139) newJson(data map[string]interface{}) base.Json {
 		"cloudID":     d.CloudID,
 		"cloudType":   1,
 		"commonAccountInfo": base.Json{
-			"account":     d.Account,
+			"account":     d.getAccount(),
 			"accountType": 1,
 		},
 	}
@@ -193,10 +245,11 @@ func (d *Yun139) familyGetFiles(catalogID string) ([]model.Obj, error) {
 			"sortDirection": 1,
 		})
 		var resp QueryContentListResp
-		_, err := d.post("/orchestration/familyCloud/content/v1.0/queryContentList", data, &resp)
+		_, err := d.post("/orchestration/familyCloud-rebuild/content/v1.2/queryContentList", data, &resp)
 		if err != nil {
 			return nil, err
 		}
+		path := resp.Data.Path
 		for _, catalog := range resp.Data.CloudCatalogList {
 			f := model.Object{
 				ID:       catalog.CatalogID,
@@ -205,6 +258,7 @@ func (d *Yun139) familyGetFiles(catalogID string) ([]model.Obj, error) {
 				IsFolder: true,
 				Modified: getTime(catalog.LastUpdateTime),
 				Ctime:    getTime(catalog.CreateTime),
+				Path:     path, // 文件夹上一级的Path
 			}
 			files = append(files, &f)
 		}
@@ -216,16 +270,72 @@ func (d *Yun139) familyGetFiles(catalogID string) ([]model.Obj, error) {
 					Size:     content.ContentSize,
 					Modified: getTime(content.LastUpdateTime),
 					Ctime:    getTime(content.CreateTime),
+					Path:     path, // 文件所在目录的Path
 				},
 				Thumbnail: model.Thumbnail{Thumbnail: content.ThumbnailURL},
 				//Thumbnail: content.BigthumbnailURL,
 			}
 			files = append(files, &f)
 		}
-		if 100*pageNum > resp.Data.TotalCount {
+		if resp.Data.TotalCount == 0 {
 			break
 		}
 		pageNum++
+	}
+	return files, nil
+}
+
+func (d *Yun139) groupGetFiles(catalogID string) ([]model.Obj, error) {
+	pageNum := 1
+	files := make([]model.Obj, 0)
+	for {
+		data := d.newJson(base.Json{
+			"groupID":         d.CloudID,
+			"catalogID":       path.Base(catalogID),
+			"contentSortType": 0,
+			"sortDirection":   1,
+			"startNumber":     pageNum,
+			"endNumber":       pageNum + 99,
+			"path":            path.Join(d.RootFolderID, catalogID),
+		})
+
+		var resp QueryGroupContentListResp
+		_, err := d.post("/orchestration/group-rebuild/content/v1.0/queryGroupContentList", data, &resp)
+		if err != nil {
+			return nil, err
+		}
+		path := resp.Data.GetGroupContentResult.ParentCatalogID
+		for _, catalog := range resp.Data.GetGroupContentResult.CatalogList {
+			f := model.Object{
+				ID:       catalog.CatalogID,
+				Name:     catalog.CatalogName,
+				Size:     0,
+				IsFolder: true,
+				Modified: getTime(catalog.UpdateTime),
+				Ctime:    getTime(catalog.CreateTime),
+				Path:     catalog.Path, // 文件夹的真实Path， root:/开头
+			}
+			files = append(files, &f)
+		}
+		for _, content := range resp.Data.GetGroupContentResult.ContentList {
+			f := model.ObjThumb{
+				Object: model.Object{
+					ID:       content.ContentID,
+					Name:     content.ContentName,
+					Size:     content.ContentSize,
+					Modified: getTime(content.UpdateTime),
+					Ctime:    getTime(content.CreateTime),
+					Path:     path, // 文件所在目录的Path
+				},
+				Thumbnail: model.Thumbnail{Thumbnail: content.ThumbnailURL},
+				//Thumbnail: content.BigthumbnailURL,
+			}
+			files = append(files, &f)
+		}
+		if (pageNum + 99) > resp.Data.GetGroupContentResult.NodeCount {
+			break
+		}
+		pageNum = pageNum + 100
 	}
 	return files, nil
 }
@@ -235,11 +345,37 @@ func (d *Yun139) getLink(contentId string) (string, error) {
 		"appName":   "",
 		"contentID": contentId,
 		"commonAccountInfo": base.Json{
-			"account":     d.Account,
+			"account":     d.getAccount(),
 			"accountType": 1,
 		},
 	}
 	res, err := d.post("/orchestration/personalCloud/uploadAndDownload/v1.0/downloadRequest",
+		data, nil)
+	if err != nil {
+		return "", err
+	}
+	return jsoniter.Get(res, "data", "downloadURL").ToString(), nil
+}
+func (d *Yun139) familyGetLink(contentId string, path string) (string, error) {
+	data := d.newJson(base.Json{
+		"contentID": contentId,
+		"path":      path,
+	})
+	res, err := d.post("/orchestration/familyCloud-rebuild/content/v1.0/getFileDownLoadURL",
+		data, nil)
+	if err != nil {
+		return "", err
+	}
+	return jsoniter.Get(res, "data", "downloadURL").ToString(), nil
+}
+
+func (d *Yun139) groupGetLink(contentId string, path string) (string, error) {
+	data := d.newJson(base.Json{
+		"contentID": contentId,
+		"groupID":   d.CloudID,
+		"path":      path,
+	})
+	res, err := d.post("/orchestration/group-rebuild/groupManage/v1.0/getGroupFileDownLoadURL",
 		data, nil)
 	if err != nil {
 		return "", err
@@ -272,17 +408,17 @@ func (d *Yun139) personalRequest(pathname string, method string, callback base.R
 	}
 	req.SetHeaders(map[string]string{
 		"Accept":               "application/json, text/plain, */*",
-		"Authorization":        "Basic " + d.Authorization,
+		"Authorization":        "Basic " + d.getAuthorization(),
 		"Caller":               "web",
 		"Cms-Device":           "default",
 		"Mcloud-Channel":       "1000101",
 		"Mcloud-Client":        "10701",
 		"Mcloud-Route":         "001",
 		"Mcloud-Sign":          fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
-		"Mcloud-Version":       "7.13.0",
+		"Mcloud-Version":       "7.14.0",
 		"Origin":               "https://yun.139.com",
 		"Referer":              "https://yun.139.com/w/",
-		"x-DeviceInfo":         "||9|7.13.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
+		"x-DeviceInfo":         "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
 		"x-huawei-channelSrc":  "10000034",
 		"x-inner-ntwk":         "2",
 		"x-m4c-caller":         "PC",
@@ -291,7 +427,7 @@ func (d *Yun139) personalRequest(pathname string, method string, callback base.R
 		"X-Yun-Api-Version":    "v1",
 		"X-Yun-App-Channel":    "10000034",
 		"X-Yun-Channel-Source": "10000034",
-		"X-Yun-Client-Info":    "||9|7.13.0|chrome|120.0.0.0|||windows 10||zh-CN|||dW5kZWZpbmVk||",
+		"X-Yun-Client-Info":    "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||dW5kZWZpbmVk||",
 		"X-Yun-Module-Type":    "100",
 		"X-Yun-Svc-Type":       "1",
 	})
@@ -402,4 +538,17 @@ func (d *Yun139) personalGetLink(fileId string) (string, error) {
 	} else {
 		return jsoniter.Get(res, "data", "url").ToString(), nil
 	}
+}
+
+func (d *Yun139) getAuthorization() string {
+	if d.ref != nil {
+		return d.ref.getAuthorization()
+	}
+	return d.Authorization
+}
+func (d *Yun139) getAccount() string {
+	if d.ref != nil {
+		return d.ref.getAccount()
+	}
+	return d.Account
 }

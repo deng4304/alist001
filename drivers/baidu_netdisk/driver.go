@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"time"
 
+	"golang.org/x/sync/semaphore"
+
 	"github.com/alist-org/alist/v3/drivers/base"
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/errs"
@@ -76,6 +78,8 @@ func (d *BaiduNetdisk) List(ctx context.Context, dir model.Obj, args model.ListA
 func (d *BaiduNetdisk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
 	if d.DownloadAPI == "crack" {
 		return d.linkCrack(file, args)
+	} else if d.DownloadAPI == "crack_video" {
+		return d.linkCrackVideo(file, args)
 	}
 	return d.linkOfficial(file, args)
 }
@@ -165,9 +169,16 @@ func (d *BaiduNetdisk) PutRapid(ctx context.Context, dstDir model.Obj, stream mo
 	if err != nil {
 		return nil, err
 	}
+	// 修复时间，具体原因见 Put 方法注释的 **注意**
+	newFile.Ctime = stream.CreateTime().Unix()
+	newFile.Mtime = stream.ModTime().Unix()
 	return fileToObj(newFile), nil
 }
 
+// Put
+//
+// **注意**: 截至 2024/04/20 百度云盘 api 接口返回的时间永远是当前时间，而不是文件时间。
+// 而实际上云盘存储的时间是文件时间，所以此处需要覆盖时间，保证缓存与云盘的数据一致
 func (d *BaiduNetdisk) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 	// rapid upload
 	if newObj, err := d.PutRapid(ctx, dstDir, stream); err == nil {
@@ -180,7 +191,7 @@ func (d *BaiduNetdisk) Put(ctx context.Context, dstDir model.Obj, stream model.F
 	}
 
 	streamSize := stream.GetSize()
-	sliceSize := d.getSliceSize()
+	sliceSize := d.getSliceSize(streamSize)
 	count := int(math.Max(math.Ceil(float64(streamSize)/float64(sliceSize)), 1))
 	lastBlockSize := streamSize % sliceSize
 	if streamSize > 0 && lastBlockSize == 0 {
@@ -188,7 +199,7 @@ func (d *BaiduNetdisk) Put(ctx context.Context, dstDir model.Obj, stream model.F
 	}
 
 	//cal md5 for first 256k data
-	const SliceSize int64 = 256 * 1024
+	const SliceSize int64 = 256 * utils.KB
 	// cal md5
 	blockList := make([]string, 0, count)
 	byteSize := sliceSize
@@ -204,7 +215,7 @@ func (d *BaiduNetdisk) Put(ctx context.Context, dstDir model.Obj, stream model.F
 		if i == count {
 			byteSize = lastBlockSize
 		}
-		_, err := io.CopyN(io.MultiWriter(fileMd5H, sliceMd5H, slicemd5H2Write), tempFile, byteSize)
+		_, err := utils.CopyWithBufferN(io.MultiWriter(fileMd5H, sliceMd5H, slicemd5H2Write), tempFile, byteSize)
 		if err != nil && err != io.EOF {
 			return nil, err
 		}
@@ -245,17 +256,18 @@ func (d *BaiduNetdisk) Put(ctx context.Context, dstDir model.Obj, stream model.F
 		log.Debugf("%+v", precreateResp)
 		if precreateResp.ReturnType == 2 {
 			//rapid upload, since got md5 match from baidu server
-			if err != nil {
-				return nil, err
-			}
+			// 修复时间，具体原因见 Put 方法注释的 **注意**
+			precreateResp.File.Ctime = ctime
+			precreateResp.File.Mtime = mtime
 			return fileToObj(precreateResp.File), nil
 		}
 	}
 	// step.2 上传分片
 	threadG, upCtx := errgroup.NewGroupWithContext(ctx, d.uploadThread,
-		retry.Attempts(3),
+		retry.Attempts(1),
 		retry.Delay(time.Second),
 		retry.DelayType(retry.BackOffDelay))
+	sem := semaphore.NewWeighted(3)
 	for i, partseq := range precreateResp.BlockList {
 		if utils.IsCanceled(upCtx) {
 			break
@@ -266,6 +278,10 @@ func (d *BaiduNetdisk) Put(ctx context.Context, dstDir model.Obj, stream model.F
 			byteSize = lastBlockSize
 		}
 		threadG.Go(func(ctx context.Context) error {
+			if err = sem.Acquire(ctx, 1); err != nil {
+				return err
+			}
+			defer sem.Release(1)
 			params := map[string]string{
 				"method":       "upload",
 				"access_token": d.AccessToken,
@@ -274,7 +290,8 @@ func (d *BaiduNetdisk) Put(ctx context.Context, dstDir model.Obj, stream model.F
 				"uploadid":     precreateResp.Uploadid,
 				"partseq":      strconv.Itoa(partseq),
 			}
-			err := d.uploadSlice(ctx, params, stream.GetName(), io.NewSectionReader(tempFile, offset, byteSize))
+			err := d.uploadSlice(ctx, params, stream.GetName(),
+				driver.NewLimitedUploadStream(ctx, io.NewSectionReader(tempFile, offset, byteSize)))
 			if err != nil {
 				return err
 			}
@@ -298,6 +315,9 @@ func (d *BaiduNetdisk) Put(ctx context.Context, dstDir model.Obj, stream model.F
 	if err != nil {
 		return nil, err
 	}
+	// 修复时间，具体原因见 Put 方法注释的 **注意**
+	newFile.Ctime = ctime
+	newFile.Mtime = mtime
 	return fileToObj(newFile), nil
 }
 

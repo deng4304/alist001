@@ -2,12 +2,15 @@ package op
 
 import (
 	"context"
+	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/alist-org/alist/v3/internal/db"
 	"github.com/alist-org/alist/v3/internal/driver"
+	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/pkg/generic_sync"
 	"github.com/alist-org/alist/v3/pkg/utils"
@@ -83,13 +86,50 @@ func LoadStorage(ctx context.Context, storage model.Storage) error {
 	return err
 }
 
+func getCurrentGoroutineStack() string {
+	buf := make([]byte, 1<<16)
+	n := runtime.Stack(buf, false)
+	return string(buf[:n])
+}
+
 // initStorage initialize the driver and store to storagesMap
 func initStorage(ctx context.Context, storage model.Storage, storageDriver driver.Driver) (err error) {
 	storageDriver.SetStorage(storage)
 	driverStorage := storageDriver.GetStorage()
-
+	defer func() {
+		if err := recover(); err != nil {
+			errInfo := fmt.Sprintf("[panic] err: %v\nstack: %s\n", err, getCurrentGoroutineStack())
+			log.Errorf("panic init storage: %s", errInfo)
+			driverStorage.SetStatus(errInfo)
+			MustSaveDriverStorage(storageDriver)
+			storagesMap.Store(driverStorage.MountPath, storageDriver)
+		}
+	}()
 	// Unmarshal Addition
 	err = utils.Json.UnmarshalFromString(driverStorage.Addition, storageDriver.GetAddition())
+	if err == nil {
+		if ref, ok := storageDriver.(driver.Reference); ok {
+			if strings.HasPrefix(driverStorage.Remark, "ref:/") {
+				refMountPath := driverStorage.Remark
+				i := strings.Index(refMountPath, "\n")
+				if i > 0 {
+					refMountPath = refMountPath[4:i]
+				} else {
+					refMountPath = refMountPath[4:]
+				}
+				var refStorage driver.Driver
+				refStorage, err = GetStorageByMountPath(refMountPath)
+				if err != nil {
+					err = fmt.Errorf("ref: %w", err)
+				} else {
+					err = ref.InitReference(refStorage)
+					if err != nil && errs.IsNotSupportError(err) {
+						err = fmt.Errorf("ref: storage is not %s", storageDriver.Config().Name)
+					}
+				}
+			}
+		}
+	}
 	if err == nil {
 		err = storageDriver.Init(ctx)
 	}

@@ -7,10 +7,11 @@ import (
 
 type Addition struct {
 	driver.RootID
-	Username string `json:"username" required:"true"`
-	Password string `json:"password" required:"true"`
-	ShareId  string `json:"share_id" required:"true"`
-	SharePwd string `json:"share_pwd"`
+	ShareId               string `json:"share_id" required:"true"`
+	SharePwd              string `json:"share_pwd"`
+	Platform              string `json:"platform" default:"web" required:"true" type:"select" options:"android,web,pc"`
+	DeviceID              string `json:"device_id"  required:"false" default:""`
+	UseTransCodingAddress bool   `json:"use_transcoding_address" required:"true" default:"false"`
 }
 
 var config = driver.Config{

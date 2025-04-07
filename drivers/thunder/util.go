@@ -17,6 +17,7 @@ import (
 const (
 	API_URL        = "https://api-pan.xunlei.com/drive/v1"
 	FILE_API_URL   = API_URL + "/files"
+	TASK_API_URL   = API_URL + "/tasks"
 	XLUSER_API_URL = "https://xluser-ssl.xunlei.com/v1"
 )
 
@@ -190,7 +191,7 @@ func getGcid(r io.Reader, size int64) (string, error) {
 	readSize := calcBlockSize(size)
 	for {
 		hash2.Reset()
-		if n, err := io.CopyN(hash2, r, readSize); err != nil && n == 0 {
+		if n, err := utils.CopyWithBufferN(hash2, r, readSize); err != nil && n == 0 {
 			if err != io.EOF {
 				return "", err
 			}

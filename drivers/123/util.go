@@ -1,6 +1,7 @@
 package _123
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -14,8 +15,9 @@ import (
 
 	"github.com/alist-org/alist/v3/drivers/base"
 	"github.com/alist-org/alist/v3/pkg/utils"
-	resty "github.com/go-resty/resty/v2"
+	"github.com/go-resty/resty/v2"
 	jsoniter "github.com/json-iterator/go"
+	log "github.com/sirupsen/logrus"
 )
 
 // do others that not defined in Driver interface
@@ -24,8 +26,9 @@ const (
 	Api              = "https://www.123pan.com/api"
 	AApi             = "https://www.123pan.com/a/api"
 	BApi             = "https://www.123pan.com/b/api"
+	LoginApi         = "https://login.123pan.com/api"
 	MainApi          = BApi
-	SignIn           = MainApi + "/user/sign_in"
+	SignIn           = LoginApi + "/user/sign_in"
 	Logout           = MainApi + "/user/logout"
 	UserInfo         = MainApi + "/user/info"
 	FileList         = MainApi + "/file/list/new"
@@ -160,7 +163,7 @@ func (d *Pan123) login() error {
 		SetHeaders(map[string]string{
 			"origin":      "https://www.123pan.com",
 			"referer":     "https://www.123pan.com/",
-			"user-agent":  "Dart/2.19(dart:io)",
+			"user-agent":  "Dart/2.19(dart:io)-alist",
 			"platform":    "web",
 			"app-version": "3",
 			//"user-agent":  base.UserAgent,
@@ -191,13 +194,15 @@ func (d *Pan123) login() error {
 //	return &authKey, nil
 //}
 
-func (d *Pan123) request(url string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
+func (d *Pan123) Request(url string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
+	isRetry := false
+do:
 	req := base.RestyClient.R()
 	req.SetHeaders(map[string]string{
 		"origin":        "https://www.123pan.com",
 		"referer":       "https://www.123pan.com/",
 		"authorization": "Bearer " + d.AccessToken,
-		"user-agent":    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+		"user-agent":    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) alist-client",
 		"platform":      "web",
 		"app-version":   "3",
 		//"user-agent":    base.UserAgent,
@@ -220,29 +225,35 @@ func (d *Pan123) request(url string, method string, callback base.ReqCallback, r
 	body := res.Body()
 	code := utils.Json.Get(body, "code").ToInt()
 	if code != 0 {
-		if code == 401 {
+		if !isRetry && code == 401 {
 			err := d.login()
 			if err != nil {
 				return nil, err
 			}
-			return d.request(url, method, callback, resp)
+			isRetry = true
+			goto do
 		}
 		return nil, errors.New(jsoniter.Get(body, "message").ToString())
 	}
 	return body, nil
 }
 
-func (d *Pan123) getFiles(parentId string) ([]File, error) {
+func (d *Pan123) getFiles(ctx context.Context, parentId string, name string) ([]File, error) {
 	page := 1
+	total := 0
 	res := make([]File, 0)
+	// 2024-02-06 fix concurrency by 123pan
 	for {
+		if err := d.APIRateLimit(ctx, FileList); err != nil {
+			return nil, err
+		}
 		var resp Files
 		query := map[string]string{
 			"driveId":              "0",
 			"limit":                "100",
 			"next":                 "0",
-			"orderBy":              d.OrderBy,
-			"orderDirection":       d.OrderDirection,
+			"orderBy":              "file_id",
+			"orderDirection":       "desc",
 			"parentFileId":         parentId,
 			"trashed":              "false",
 			"SearchData":           "",
@@ -252,17 +263,22 @@ func (d *Pan123) getFiles(parentId string) ([]File, error) {
 			"operateType":          "4",
 			"inDirectSpace":        "false",
 		}
-		_, err := d.request(FileList, http.MethodGet, func(req *resty.Request) {
+		_res, err := d.Request(FileList, http.MethodGet, func(req *resty.Request) {
 			req.SetQueryParams(query)
 		}, &resp)
 		if err != nil {
 			return nil, err
 		}
+		log.Debug(string(_res))
 		page++
 		res = append(res, resp.Data.InfoList...)
+		total = resp.Data.Total
 		if len(resp.Data.InfoList) == 0 || resp.Data.Next == "-1" {
 			break
 		}
+	}
+	if len(res) != total {
+		log.Warnf("incorrect file count from remote at %s: expected %d, got %d", name, total, len(res))
 	}
 	return res, nil
 }

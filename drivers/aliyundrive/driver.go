@@ -14,13 +14,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/alist-org/alist/v3/internal/stream"
-
 	"github.com/alist-org/alist/v3/drivers/base"
 	"github.com/alist-org/alist/v3/internal/conf"
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/alist-org/alist/v3/internal/stream"
 	"github.com/alist-org/alist/v3/pkg/cron"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/go-resty/resty/v2"
@@ -52,7 +51,7 @@ func (d *AliDrive) Init(ctx context.Context) error {
 		return err
 	}
 	// get driver id
-	res, err, _ := d.request("https://api.aliyundrive.com/v2/user/get", http.MethodPost, nil, nil)
+	res, err, _ := d.request("https://api.alipan.com/v2/user/get", http.MethodPost, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -106,7 +105,7 @@ func (d *AliDrive) Link(ctx context.Context, file model.Obj, args model.LinkArgs
 		"file_id":    file.GetID(),
 		"expire_sec": 14400,
 	}
-	res, err, _ := d.request("https://api.aliyundrive.com/v2/file/get_download_url", http.MethodPost, func(req *resty.Request) {
+	res, err, _ := d.request("https://api.alipan.com/v2/file/get_download_url", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(data)
 	}, nil)
 	if err != nil {
@@ -114,14 +113,14 @@ func (d *AliDrive) Link(ctx context.Context, file model.Obj, args model.LinkArgs
 	}
 	return &model.Link{
 		Header: http.Header{
-			"Referer": []string{"https://www.aliyundrive.com/"},
+			"Referer": []string{"https://www.alipan.com/"},
 		},
 		URL: utils.Json.Get(res, "url").ToString(),
 	}, nil
 }
 
 func (d *AliDrive) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
-	_, err, _ := d.request("https://api.aliyundrive.com/adrive/v2/file/createWithFolders", http.MethodPost, func(req *resty.Request) {
+	_, err, _ := d.request("https://api.alipan.com/adrive/v2/file/createWithFolders", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(base.Json{
 			"check_name_mode": "refuse",
 			"drive_id":        d.DriveId,
@@ -139,7 +138,7 @@ func (d *AliDrive) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
 }
 
 func (d *AliDrive) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
-	_, err, _ := d.request("https://api.aliyundrive.com/v3/file/update", http.MethodPost, func(req *resty.Request) {
+	_, err, _ := d.request("https://api.alipan.com/v3/file/update", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(base.Json{
 			"check_name_mode": "refuse",
 			"drive_id":        d.DriveId,
@@ -156,7 +155,7 @@ func (d *AliDrive) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 }
 
 func (d *AliDrive) Remove(ctx context.Context, obj model.Obj) error {
-	_, err, _ := d.request("https://api.aliyundrive.com/v2/recyclebin/trash", http.MethodPost, func(req *resty.Request) {
+	_, err, _ := d.request("https://api.alipan.com/v2/recyclebin/trash", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(base.Json{
 			"drive_id": d.DriveId,
 			"file_id":  obj.GetID(),
@@ -194,7 +193,10 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 	}
 	if d.RapidUpload {
 		buf := bytes.NewBuffer(make([]byte, 0, 1024))
-		io.CopyN(buf, file, 1024)
+		_, err := utils.CopyWithBufferN(buf, file, 1024)
+		if err != nil {
+			return err
+		}
 		reqBody["pre_hash"] = utils.HashData(utils.SHA1, buf.Bytes())
 		if localFile != nil {
 			if _, err := localFile.Seek(0, io.SeekStart); err != nil {
@@ -216,7 +218,7 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 	}
 
 	var resp UploadResp
-	_, err, e := d.request("https://api.aliyundrive.com/adrive/v2/file/createWithFolders", http.MethodPost, func(req *resty.Request) {
+	_, err, e := d.request("https://api.alipan.com/adrive/v2/file/createWithFolders", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(reqBody)
 	}, &resp)
 
@@ -270,7 +272,7 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 		n, _ := io.NewSectionReader(localFile, o.Int64(), 8).Read(buf[:8])
 		reqBody["proof_code"] = base64.StdEncoding.EncodeToString(buf[:n])
 
-		_, err, e := d.request("https://api.aliyundrive.com/adrive/v2/file/createWithFolders", http.MethodPost, func(req *resty.Request) {
+		_, err, e := d.request("https://api.alipan.com/adrive/v2/file/createWithFolders", http.MethodPost, func(req *resty.Request) {
 			req.SetBody(reqBody)
 		}, &resp)
 		if err != nil && e.Code != "PreHashMatched" {
@@ -286,6 +288,7 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 		file.Reader = localFile
 	}
 
+	rateLimited := driver.NewLimitedUploadStream(ctx, file)
 	for i, partInfo := range resp.PartInfoList {
 		if utils.IsCanceled(ctx) {
 			return ctx.Err()
@@ -294,7 +297,7 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 		if d.InternalUpload {
 			url = partInfo.InternalUploadUrl
 		}
-		req, err := http.NewRequest("PUT", url, io.LimitReader(file, DEFAULT))
+		req, err := http.NewRequest("PUT", url, io.LimitReader(rateLimited, DEFAULT))
 		if err != nil {
 			return err
 		}
@@ -303,13 +306,13 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 		if err != nil {
 			return err
 		}
-		res.Body.Close()
+		_ = res.Body.Close()
 		if count > 0 {
 			up(float64(i) * 100 / float64(count))
 		}
 	}
 	var resp2 base.Json
-	_, err, e = d.request("https://api.aliyundrive.com/v2/file/complete", http.MethodPost, func(req *resty.Request) {
+	_, err, e = d.request("https://api.alipan.com/v2/file/complete", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(base.Json{
 			"drive_id":  d.DriveId,
 			"file_id":   resp.FileId,
@@ -334,10 +337,10 @@ func (d *AliDrive) Other(ctx context.Context, args model.OtherArgs) (interface{}
 	}
 	switch args.Method {
 	case "doc_preview":
-		url = "https://api.aliyundrive.com/v2/file/get_office_preview_url"
+		url = "https://api.alipan.com/v2/file/get_office_preview_url"
 		data["access_token"] = d.AccessToken
 	case "video_preview":
-		url = "https://api.aliyundrive.com/v2/file/get_video_preview_play_info"
+		url = "https://api.alipan.com/v2/file/get_video_preview_play_info"
 		data["category"] = "live_transcoding"
 		data["url_expire_sec"] = 14400
 	default:

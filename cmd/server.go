@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	ftpserver "github.com/KirCute/ftpserverlib-pasvportmap"
+	"github.com/KirCute/sftpd-alist"
+	"github.com/alist-org/alist/v3/internal/fs"
 	"net"
 	"net/http"
 	"os"
@@ -91,6 +94,63 @@ the address is defined in config file`,
 				}
 			}()
 		}
+		if conf.Conf.S3.Port != -1 && conf.Conf.S3.Enable {
+			s3r := gin.New()
+			s3r.Use(gin.LoggerWithWriter(log.StandardLogger().Out), gin.RecoveryWithWriter(log.StandardLogger().Out))
+			server.InitS3(s3r)
+			s3Base := fmt.Sprintf("%s:%d", conf.Conf.Scheme.Address, conf.Conf.S3.Port)
+			utils.Log.Infof("start S3 server @ %s", s3Base)
+			go func() {
+				var err error
+				if conf.Conf.S3.SSL {
+					httpsSrv = &http.Server{Addr: s3Base, Handler: s3r}
+					err = httpsSrv.ListenAndServeTLS(conf.Conf.Scheme.CertFile, conf.Conf.Scheme.KeyFile)
+				}
+				if !conf.Conf.S3.SSL {
+					httpSrv = &http.Server{Addr: s3Base, Handler: s3r}
+					err = httpSrv.ListenAndServe()
+				}
+				if err != nil && !errors.Is(err, http.ErrServerClosed) {
+					utils.Log.Fatalf("failed to start s3 server: %s", err.Error())
+				}
+			}()
+		}
+		var ftpDriver *server.FtpMainDriver
+		var ftpServer *ftpserver.FtpServer
+		if conf.Conf.FTP.Listen != "" && conf.Conf.FTP.Enable {
+			var err error
+			ftpDriver, err = server.NewMainDriver()
+			if err != nil {
+				utils.Log.Fatalf("failed to start ftp driver: %s", err.Error())
+			} else {
+				utils.Log.Infof("start ftp server on %s", conf.Conf.FTP.Listen)
+				go func() {
+					ftpServer = ftpserver.NewFtpServer(ftpDriver)
+					err = ftpServer.ListenAndServe()
+					if err != nil {
+						utils.Log.Fatalf("problem ftp server listening: %s", err.Error())
+					}
+				}()
+			}
+		}
+		var sftpDriver *server.SftpDriver
+		var sftpServer *sftpd.SftpServer
+		if conf.Conf.SFTP.Listen != "" && conf.Conf.SFTP.Enable {
+			var err error
+			sftpDriver, err = server.NewSftpDriver()
+			if err != nil {
+				utils.Log.Fatalf("failed to start sftp driver: %s", err.Error())
+			} else {
+				utils.Log.Infof("start sftp server on %s", conf.Conf.SFTP.Listen)
+				go func() {
+					sftpServer = sftpd.NewSftpServer(sftpDriver)
+					err = sftpServer.RunServer()
+					if err != nil {
+						utils.Log.Fatalf("problem sftp server listening: %s", err.Error())
+					}
+				}()
+			}
+		}
 		// Wait for interrupt signal to gracefully shutdown the server with
 		// a timeout of 1 second.
 		quit := make(chan os.Signal, 1)
@@ -100,6 +160,7 @@ the address is defined in config file`,
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 		<-quit
 		utils.Log.Println("Shutdown server...")
+		fs.ArchiveContentUploadTaskManager.RemoveAll()
 		Release()
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
@@ -128,6 +189,25 @@ the address is defined in config file`,
 				defer wg.Done()
 				if err := unixSrv.Shutdown(ctx); err != nil {
 					utils.Log.Fatal("Unix server shutdown err: ", err)
+				}
+			}()
+		}
+		if conf.Conf.FTP.Listen != "" && conf.Conf.FTP.Enable && ftpServer != nil && ftpDriver != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ftpDriver.Stop()
+				if err := ftpServer.Stop(); err != nil {
+					utils.Log.Fatal("FTP server shutdown err: ", err)
+				}
+			}()
+		}
+		if conf.Conf.SFTP.Listen != "" && conf.Conf.SFTP.Enable && sftpServer != nil && sftpDriver != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := sftpServer.Close(); err != nil {
+					utils.Log.Fatal("SFTP server shutdown err: ", err)
 				}
 			}()
 		}
