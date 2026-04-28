@@ -43,6 +43,7 @@ const (
 	S3Auth           = MainApi + "/file/s3_upload_object/auth"
 	UploadCompleteV2 = MainApi + "/file/upload_complete/v2"
 	S3Complete       = MainApi + "/file/s3_complete_multipart_upload"
+	SafeBoxUnlock    = MainApi + "/restful/goapi/v1/file/safe_box/auth/unlockbox"
 	//AuthKeySalt      = "8-8D$sL8gPjom7bk#cY"
 )
 
@@ -161,12 +162,12 @@ func (d *Pan123) login() error {
 	}
 	res, err := base.RestyClient.R().
 		SetHeaders(map[string]string{
-			"origin":      "https://www.123pan.com",
-			"referer":     "https://www.123pan.com/",
-			"user-agent":  "Dart/2.19(dart:io)-alist",
+			"origin":  "https://www.123pan.com",
+			"referer": "https://www.123pan.com/",
+			//"user-agent":  "Dart/2.19(dart:io)-alist",
 			"platform":    "web",
 			"app-version": "3",
-			//"user-agent":  base.UserAgent,
+			"user-agent":  base.UserAgent,
 		}).
 		SetBody(body).Post(SignIn)
 	if err != nil {
@@ -202,7 +203,7 @@ do:
 		"origin":        "https://www.123pan.com",
 		"referer":       "https://www.123pan.com/",
 		"authorization": "Bearer " + d.AccessToken,
-		"user-agent":    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) alist-client",
+		"user-agent":    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
 		"platform":      "web",
 		"app-version":   "3",
 		//"user-agent":    base.UserAgent,
@@ -238,6 +239,22 @@ do:
 	return body, nil
 }
 
+func (d *Pan123) unlockSafeBox(fileId int64) error {
+	if _, ok := d.safeBoxUnlocked.Load(fileId); ok {
+		return nil
+	}
+	data := base.Json{"password": d.SafePassword}
+	url := fmt.Sprintf("%s?fileId=%d", SafeBoxUnlock, fileId)
+	_, err := d.Request(url, http.MethodPost, func(req *resty.Request) {
+		req.SetBody(data)
+	}, nil)
+	if err != nil {
+		return err
+	}
+	d.safeBoxUnlocked.Store(fileId, true)
+	return nil
+}
+
 func (d *Pan123) getFiles(ctx context.Context, parentId string, name string) ([]File, error) {
 	page := 1
 	total := 0
@@ -267,6 +284,15 @@ func (d *Pan123) getFiles(ctx context.Context, parentId string, name string) ([]
 			req.SetQueryParams(query)
 		}, &resp)
 		if err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "safe box") || strings.Contains(err.Error(), "保险箱") {
+				if fid, e := strconv.ParseInt(parentId, 10, 64); e == nil {
+					if e = d.unlockSafeBox(fid); e == nil {
+						return d.getFiles(ctx, parentId, name)
+					}
+					return nil, e
+				}
+			}
 			return nil, err
 		}
 		log.Debug(string(_res))

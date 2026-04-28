@@ -5,6 +5,7 @@ import (
 	"github.com/alist-org/alist/v3/drivers/pikpak"
 	"github.com/alist-org/alist/v3/drivers/thunder"
 	"github.com/alist-org/alist/v3/internal/conf"
+	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/offline_download/tool"
 	"github.com/alist-org/alist/v3/internal/op"
@@ -253,10 +254,6 @@ type AddOfflineDownloadReq struct {
 
 func AddOfflineDownload(c *gin.Context) {
 	user := c.MustGet("user").(*model.User)
-	if !user.CanAddOfflineDownloadTasks() {
-		common.ErrorStrResp(c, "permission denied", 403)
-		return
-	}
 
 	var req AddOfflineDownloadReq
 	if err := c.ShouldBind(&req); err != nil {
@@ -266,6 +263,15 @@ func AddOfflineDownload(c *gin.Context) {
 	reqPath, err := user.JoinPath(req.Path)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
+		return
+	}
+	if !common.CheckPathLimitWithRoles(user, reqPath) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
+		return
+	}
+	perm := common.MergeRolePermissions(user, reqPath)
+	if !common.HasPermission(perm, common.PermAddOfflineDownload) {
+		common.ErrorStrResp(c, "permission denied", 403)
 		return
 	}
 	var tasks []task.TaskExtensionInfo

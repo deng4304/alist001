@@ -2,18 +2,20 @@ package rardecode
 
 import (
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	stdpath "path"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
 	"github.com/alist-org/alist/v3/internal/archive/tool"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/stream"
 	"github.com/nwaples/rardecode/v2"
-	"io"
-	"io/fs"
-	"os"
-	stdpath "path"
-	"sort"
-	"strings"
-	"time"
 )
 
 type VolumeFile struct {
@@ -179,27 +181,21 @@ func getReader(ss []*stream.SeekableStream, password string) (*rardecode.Reader,
 	return &rc.Reader, nil
 }
 
-func decompress(reader *rardecode.Reader, header *rardecode.FileHeader, filePath, outputPath string) error {
-	targetPath := outputPath
-	dir, base := stdpath.Split(filePath)
-	if dir != "" {
-		targetPath = stdpath.Join(targetPath, dir)
-		err := os.MkdirAll(targetPath, 0700)
-		if err != nil {
-			return err
-		}
+func decompress(reader *rardecode.Reader, header *rardecode.FileHeader, dstPath string) error {
+	if header.IsDir {
+		return os.MkdirAll(dstPath, 0700)
 	}
-	if base != "" {
-		err := _decompress(reader, header, targetPath, func(_ float64) {})
-		if err != nil {
-			return err
-		}
+	if !header.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s", tool.ErrArchiveIllegalPath, header.Name)
 	}
-	return nil
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0700); err != nil {
+		return err
+	}
+	return _decompress(reader, header, dstPath, func(_ float64) {})
 }
 
-func _decompress(reader *rardecode.Reader, header *rardecode.FileHeader, targetPath string, up model.UpdateProgress) error {
-	f, err := os.OpenFile(stdpath.Join(targetPath, stdpath.Base(header.Name)), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+func _decompress(reader *rardecode.Reader, header *rardecode.FileHeader, dstPath string, up model.UpdateProgress) error {
+	f, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}

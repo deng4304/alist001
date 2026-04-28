@@ -6,6 +6,7 @@ import (
 	"net/http/cookiejar"
 
 	"github.com/alist-org/alist/v3/drivers/webdav/odrvcookie"
+	"github.com/alist-org/alist/v3/internal/conf"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/pkg/gowebdav"
 )
@@ -20,7 +21,7 @@ func (d *WebDav) setClient() error {
 	c := gowebdav.NewClient(d.Address, d.Username, d.Password)
 	c.SetTransport(&http.Transport{
 		Proxy:           http.ProxyFromEnvironment,
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: d.TlsInsecureSkipVerify},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify},
 	})
 	if d.isSharepoint() {
 		cookie, err := odrvcookie.GetCookie(d.Username, d.Password, d.Address)

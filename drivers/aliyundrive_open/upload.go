@@ -1,7 +1,6 @@
 package aliyundrive_open
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"github.com/alist-org/alist/v3/drivers/base"
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/model"
+	streamPkg "github.com/alist-org/alist/v3/internal/stream"
 	"github.com/alist-org/alist/v3/pkg/http_range"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/avast/retry-go"
@@ -50,10 +50,10 @@ func calPartSize(fileSize int64) int64 {
 	return partSize
 }
 
-func (d *AliyundriveOpen) getUploadUrl(count int, fileId, uploadId string) ([]PartInfo, error) {
+func (d *AliyundriveOpen) getUploadUrl(ctx context.Context, count int, fileId, uploadId string) ([]PartInfo, error) {
 	partInfoList := makePartInfos(count)
 	var resp CreateResp
-	_, err := d.request("/adrive/v1.0/openFile/getUploadUrl", http.MethodPost, func(req *resty.Request) {
+	_, err := d.request(ctx, limiterOther, "/adrive/v1.0/openFile/getUploadUrl", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(base.Json{
 			"drive_id":       d.DriveId,
 			"file_id":        fileId,
@@ -84,10 +84,10 @@ func (d *AliyundriveOpen) uploadPart(ctx context.Context, r io.Reader, partInfo 
 	return nil
 }
 
-func (d *AliyundriveOpen) completeUpload(fileId, uploadId string) (model.Obj, error) {
+func (d *AliyundriveOpen) completeUpload(ctx context.Context, fileId, uploadId string) (model.Obj, error) {
 	// 3. complete
 	var newFile File
-	_, err := d.request("/adrive/v1.0/openFile/complete", http.MethodPost, func(req *resty.Request) {
+	_, err := d.request(ctx, limiterOther, "/adrive/v1.0/openFile/complete", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(base.Json{
 			"drive_id":  d.DriveId,
 			"file_id":   fileId,
@@ -131,16 +131,19 @@ func (d *AliyundriveOpen) calProofCode(stream model.FileStreamer) (string, error
 		return "", err
 	}
 	length := proofRange.End - proofRange.Start
-	buf := bytes.NewBuffer(make([]byte, 0, length))
 	reader, err := stream.RangeRead(http_range.Range{Start: proofRange.Start, Length: length})
 	if err != nil {
 		return "", err
 	}
-	_, err = utils.CopyWithBufferN(buf, reader, length)
+	buf := make([]byte, length)
+	n, err := io.ReadFull(reader, buf)
+	if err == io.ErrUnexpectedEOF {
+		return "", fmt.Errorf("can't read data, expected=%d, got=%d", len(buf), n)
+	}
 	if err != nil {
 		return "", err
 	}
-	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
+	return base64.StdEncoding.EncodeToString(buf), nil
 }
 
 func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
@@ -180,28 +183,21 @@ func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream m
 		createData["pre_hash"] = hash
 	}
 	var createResp CreateResp
-	_, err, e := d.requestReturnErrResp("/adrive/v1.0/openFile/create", http.MethodPost, func(req *resty.Request) {
+	_, err, e := d.requestReturnErrResp(ctx, limiterOther, "/adrive/v1.0/openFile/create", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(createData).SetResult(&createResp)
 	})
-	var tmpF model.File
 	if err != nil {
 		if e.Code != "PreHashMatched" || !rapidUpload {
 			return nil, err
 		}
 		log.Debugf("[aliyundrive_open] pre_hash matched, start rapid upload")
 
-		hi := stream.GetHash()
-		hash := hi.GetHash(utils.SHA1)
-		if len(hash) <= 0 {
-			tmpF, err = stream.CacheFullInTempFile()
+		hash := stream.GetHash().GetHash(utils.SHA1)
+		if len(hash) != utils.SHA1.Width {
+			_, hash, err = streamPkg.CacheFullInTempFileAndHash(stream, utils.SHA1)
 			if err != nil {
 				return nil, err
 			}
-			hash, err = utils.HashFile(utils.SHA1, tmpF)
-			if err != nil {
-				return nil, err
-			}
-
 		}
 
 		delete(createData, "pre_hash")
@@ -212,7 +208,7 @@ func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream m
 		if err != nil {
 			return nil, fmt.Errorf("cal proof code error: %s", err.Error())
 		}
-		_, err = d.request("/adrive/v1.0/openFile/create", http.MethodPost, func(req *resty.Request) {
+		_, err = d.request(ctx, limiterOther, "/adrive/v1.0/openFile/create", http.MethodPost, func(req *resty.Request) {
 			req.SetBody(createData).SetResult(&createResp)
 		})
 		if err != nil {
@@ -233,7 +229,7 @@ func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream m
 			}
 			// refresh upload url if 50 minutes passed
 			if time.Since(preTime) > 50*time.Minute {
-				createResp.PartInfoList, err = d.getUploadUrl(count, createResp.FileId, createResp.UploadId)
+				createResp.PartInfoList, err = d.getUploadUrl(ctx, count, createResp.FileId, createResp.UploadId)
 				if err != nil {
 					return nil, err
 				}
@@ -270,5 +266,5 @@ func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream m
 
 	log.Debugf("[aliyundrive_open] create file success, resp: %+v", createResp)
 	// 3. complete
-	return d.completeUpload(createResp.FileId, createResp.UploadId)
+	return d.completeUpload(ctx, createResp.FileId, createResp.UploadId)
 }

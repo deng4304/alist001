@@ -18,7 +18,7 @@ type TaskInfo struct {
 	ID          string      `json:"id"`
 	Name        string      `json:"name"`
 	Creator     string      `json:"creator"`
-	CreatorRole int         `json:"creator_role"`
+	CreatorRole model.Roles `json:"creator_role"`
 	State       tache.State `json:"state"`
 	Status      string      `json:"status"`
 	Progress    float64     `json:"progress"`
@@ -39,7 +39,7 @@ func getTaskInfo[T task.TaskExtensionInfo](task T) TaskInfo {
 		progress = 100
 	}
 	creatorName := ""
-	creatorRole := -1
+	var creatorRole model.Roles
 	if task.GetCreator() != nil {
 		creatorName = task.GetCreator().Username
 		creatorRole = task.GetCreator().Role
@@ -220,6 +220,7 @@ func SetupTaskRoute(g *gin.RouterGroup) {
 	taskRoute(g.Group("/copy"), fs.CopyTaskManager)
 	taskRoute(g.Group("/offline_download"), tool.DownloadTaskManager)
 	taskRoute(g.Group("/offline_download_transfer"), tool.TransferTaskManager)
+	taskRoute(g.Group("/s3_transition"), fs.S3TransitionTaskManager)
 	taskRoute(g.Group("/decompress"), fs.ArchiveDownloadTaskManager)
 	taskRoute(g.Group("/decompress_upload"), fs.ArchiveContentUploadTaskManager)
 }

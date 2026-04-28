@@ -35,6 +35,7 @@ type Scheme struct {
 	KeyFile      string `json:"key_file" env:"KEY_FILE"`
 	UnixFile     string `json:"unix_file" env:"UNIX_FILE"`
 	UnixFilePerm string `json:"unix_file_perm" env:"UNIX_FILE_PERM"`
+	EnableH2c    bool   `json:"enable_h2c" env:"ENABLE_H2C"`
 }
 
 type LogConfig struct {
@@ -59,6 +60,7 @@ type TasksConfig struct {
 	Copy               TaskConfig `json:"copy" envPrefix:"COPY_"`
 	Decompress         TaskConfig `json:"decompress" envPrefix:"DECOMPRESS_"`
 	DecompressUpload   TaskConfig `json:"decompress_upload" envPrefix:"DECOMPRESS_UPLOAD_"`
+	S3Transition       TaskConfig `json:"s3_transition" envPrefix:"S3_TRANSITION_"`
 	AllowRetryCanceled bool       `json:"allow_retry_canceled" env:"ALLOW_RETRY_CANCELED"`
 }
 
@@ -92,6 +94,11 @@ type SFTP struct {
 	Listen string `json:"listen" env:"LISTEN"`
 }
 
+type MCP struct {
+	Enable bool `json:"enable" env:"ENABLE"`
+	Port   int  `json:"port" env:"PORT"`
+}
+
 type Config struct {
 	Force                 bool        `json:"force" env:"FORCE"`
 	SiteURL               string      `json:"site_url" env:"SITE_URL"`
@@ -114,6 +121,7 @@ type Config struct {
 	S3                    S3          `json:"s3" envPrefix:"S3_"`
 	FTP                   FTP         `json:"ftp" envPrefix:"FTP_"`
 	SFTP                  SFTP        `json:"sftp" envPrefix:"SFTP_"`
+	MCP                   MCP         `json:"mcp" envPrefix:"MCP_"`
 	LastLaunchedVersion   string      `json:"last_launched_version"`
 }
 
@@ -154,7 +162,7 @@ func DefaultConfig() *Config {
 		},
 		MaxConnections:        0,
 		MaxConcurrency:        64,
-		TlsInsecureSkipVerify: true,
+		TlsInsecureSkipVerify: false,
 		Tasks: TasksConfig{
 			Download: TaskConfig{
 				Workers:  5,
@@ -183,6 +191,11 @@ func DefaultConfig() *Config {
 				Workers:  5,
 				MaxRetry: 2,
 			},
+			S3Transition: TaskConfig{
+				Workers:  5,
+				MaxRetry: 2,
+				// TaskPersistant: true,
+			},
 			AllowRetryCanceled: false,
 		},
 		Cors: Cors{
@@ -210,6 +223,10 @@ func DefaultConfig() *Config {
 		SFTP: SFTP{
 			Enable: false,
 			Listen: ":5222",
+		},
+		MCP: MCP{
+			Enable: false,
+			Port:   5248,
 		},
 		LastLaunchedVersion: "",
 	}

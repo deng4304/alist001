@@ -1,10 +1,12 @@
 package archives
 
 import (
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	stdpath "path"
+	"path/filepath"
 	"strings"
 
 	"github.com/alist-org/alist/v3/internal/archive/tool"
@@ -106,7 +108,7 @@ func (Archives) Decompress(ss []*stream.SeekableStream, outputPath string, args 
 		}
 		if stat.IsDir() {
 			isDir = true
-			outputPath = stdpath.Join(outputPath, stat.Name())
+			outputPath = filepath.Join(outputPath, stat.Name())
 			err = os.Mkdir(outputPath, 0700)
 			if err != nil {
 				return filterPassword(err)
@@ -118,18 +120,46 @@ func (Archives) Decompress(ss []*stream.SeekableStream, outputPath string, args 
 			if err != nil {
 				return err
 			}
-			relPath := strings.TrimPrefix(p, path+"/")
-			dstPath := stdpath.Join(outputPath, relPath)
-			if d.IsDir() {
-				err = os.MkdirAll(dstPath, 0700)
-			} else {
-				dir := stdpath.Dir(dstPath)
-				err = decompress(fsys, p, dir, func(_ float64) {})
+			if p == path {
+				if d.IsDir() {
+					return nil
+				}
 			}
-			return err
+			relPath := strings.TrimPrefix(p, path+"/")
+			if relPath == "" || relPath == "." {
+				if d.IsDir() {
+					return nil
+				}
+			}
+			dstPath, err := tool.SecureJoin(outputPath, relPath)
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return os.MkdirAll(dstPath, 0700)
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("%w: %s", tool.ErrArchiveIllegalPath, p)
+			}
+			if err := os.MkdirAll(filepath.Dir(dstPath), 0700); err != nil {
+				return err
+			}
+			return decompress(fsys, p, dstPath, func(_ float64) {})
 		})
 	} else {
-		err = decompress(fsys, path, outputPath, up)
+		entryName := stdpath.Base(path)
+		dstPath, e := tool.SecureJoin(outputPath, entryName)
+		if e != nil {
+			return e
+		}
+		if err = os.MkdirAll(filepath.Dir(dstPath), 0700); err != nil {
+			return err
+		}
+		err = decompress(fsys, path, dstPath, up)
 	}
 	return filterPassword(err)
 }

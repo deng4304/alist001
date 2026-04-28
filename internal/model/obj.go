@@ -2,6 +2,7 @@ package model
 
 import (
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +18,10 @@ import (
 
 type ObjUnwrap interface {
 	Unwrap() Obj
+}
+
+type StorageClassProvider interface {
+	StorageClass() string
 }
 
 type Obj interface {
@@ -48,10 +53,26 @@ type FileStreamer interface {
 	RangeRead(http_range.Range) (io.Reader, error)
 	//for a non-seekable Stream, if Read is called, this function won't work
 	CacheFullInTempFile() (File, error)
-	CacheFullInTempFileAndUpdateProgress(up UpdateProgress) (File, error)
+	SetTmpFile(r *os.File)
+	GetFile() File
 }
 
 type UpdateProgress func(percentage float64)
+
+// Reference implementation from OpenListTeam:
+// https://github.com/OpenListTeam/OpenList/blob/a703b736c9346c483bae56905a39bc07bf781cff/internal/model/obj.go#L58
+func UpdateProgressWithRange(inner UpdateProgress, start, end float64) UpdateProgress {
+	return func(p float64) {
+		if p < 0 {
+			p = 0
+		}
+		if p > 100 {
+			p = 100
+		}
+		scaled := start + (end-start)*(p/100.0)
+		inner(scaled)
+	}
+}
 
 type URL interface {
 	URL() string
@@ -124,6 +145,13 @@ func WrapObjsName(objs []Obj) {
 	}
 }
 
+func WrapObjStorageClass(obj Obj, storageClass string) Obj {
+	if storageClass == "" {
+		return obj
+	}
+	return &ObjWrapStorageClass{Obj: obj, storageClass: storageClass}
+}
+
 func UnwrapObj(obj Obj) Obj {
 	if unwrap, ok := obj.(ObjUnwrap); ok {
 		obj = unwrap.Unwrap()
@@ -149,6 +177,20 @@ func GetUrl(obj Obj) (url string, ok bool) {
 		return GetUrl(unwrap.Unwrap())
 	}
 	return url, false
+}
+
+func GetStorageClass(obj Obj) (string, bool) {
+	if provider, ok := obj.(StorageClassProvider); ok {
+		value := provider.StorageClass()
+		if value == "" {
+			return "", false
+		}
+		return value, true
+	}
+	if unwrap, ok := obj.(ObjUnwrap); ok {
+		return GetStorageClass(unwrap.Unwrap())
+	}
+	return "", false
 }
 
 func GetRawObject(obj Obj) *Object {

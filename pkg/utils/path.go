@@ -88,9 +88,51 @@ func JoinBasePath(basePath, reqPath string) (string, error) {
 		strings.Contains(reqPath, "/../") {
 		return "", errs.RelativePath
 	}
+
+	reqPath = FixAndCleanPath(reqPath)
+
+	if strings.HasPrefix(reqPath, "/") {
+		return reqPath, nil
+	}
+
 	return stdpath.Join(FixAndCleanPath(basePath), FixAndCleanPath(reqPath)), nil
 }
 
 func GetFullPath(mountPath, path string) string {
 	return stdpath.Join(GetActualMountPath(mountPath), path)
+}
+
+// ValidateNameComponent validates a single path component.
+// It rejects empty names, dot segments, separators, ".." sequences, and NUL bytes.
+func ValidateNameComponent(name string) error {
+	if name == "" {
+		return errs.InvalidName
+	}
+	if name == "." || name == ".." {
+		return errs.InvalidName
+	}
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return errs.InvalidName
+	}
+	if strings.Contains(name, "..") {
+		return errs.InvalidName
+	}
+	if strings.ContainsRune(name, 0) {
+		return errs.InvalidName
+	}
+	return nil
+}
+
+// JoinUnderBase safely joins baseDir with a single name component and ensures the
+// result stays under baseDir after normalization.
+func JoinUnderBase(baseDir, name string) (string, error) {
+	if err := ValidateNameComponent(name); err != nil {
+		return "", err
+	}
+	base := FixAndCleanPath(baseDir)
+	joined := FixAndCleanPath(stdpath.Join(base, name))
+	if !IsSubPath(base, joined) {
+		return "", errs.InvalidName
+	}
+	return joined, nil
 }

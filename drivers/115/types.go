@@ -12,6 +12,7 @@ var _ model.Obj = (*FileObj)(nil)
 
 type FileObj struct {
 	driver.File
+	ThumbURL string
 }
 
 func (f *FileObj) CreateTime() time.Time {
@@ -20,6 +21,10 @@ func (f *FileObj) CreateTime() time.Time {
 
 func (f *FileObj) GetHash() utils.HashInfo {
 	return utils.NewHashInfo(utils.SHA1, f.Sha1)
+}
+
+func (f *FileObj) Thumb() string {
+	return f.ThumbURL
 }
 
 type UploadResult struct {

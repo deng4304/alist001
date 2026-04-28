@@ -66,9 +66,11 @@ func (d *Pan115) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 	if err := d.WaitLimit(ctx); err != nil {
 		return nil, err
 	}
-	userAgent := args.Header.Get("User-Agent")
-	downloadInfo, err := d.
-		DownloadWithUA(file.(*FileObj).PickCode, userAgent)
+	userAgent := ""
+	if args.Header != nil {
+		userAgent = args.Header.Get("User-Agent")
+	}
+	downloadInfo, err := d.client.DownloadWithUA(file.(*FileObj).PickCode, userAgent)
 	if err != nil {
 		return nil, err
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/op"
 	"github.com/alist-org/alist/v3/pkg/generic"
+	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/alist-org/alist/v3/server/common"
 	"github.com/gin-gonic/gin"
 	"github.com/pkg/errors"
@@ -29,18 +30,27 @@ func FsRecursiveMove(c *gin.Context) {
 	}
 
 	user := c.MustGet("user").(*model.User)
-	if !user.CanMove() {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
 	srcDir, err := user.JoinPath(req.SrcDir)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
 		return
 	}
+	if !common.CheckPathLimitWithRoles(user, srcDir) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
+		return
+	}
 	dstDir, err := user.JoinPath(req.DstDir)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
+		return
+	}
+	if !common.CheckPathLimitWithRoles(user, dstDir) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
+		return
+	}
+	perm := common.MergeRolePermissions(user, srcDir)
+	if !common.HasPermission(perm, common.PermMove) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
 		return
 	}
 
@@ -149,14 +159,18 @@ func FsBatchRename(c *gin.Context) {
 		return
 	}
 	user := c.MustGet("user").(*model.User)
-	if !user.CanRename() {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
-
 	reqPath, err := user.JoinPath(req.SrcDir)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
+		return
+	}
+	if !common.CheckPathLimitWithRoles(user, reqPath) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
+		return
+	}
+	perm := common.MergeRolePermissions(user, reqPath)
+	if !common.HasPermission(perm, common.PermRename) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
 		return
 	}
 
@@ -172,7 +186,18 @@ func FsBatchRename(c *gin.Context) {
 		if renameObject.SrcName == "" || renameObject.NewName == "" {
 			continue
 		}
-		filePath := fmt.Sprintf("%s/%s", reqPath, renameObject.SrcName)
+		if err := utils.ValidateNameComponent(renameObject.NewName); err != nil {
+			common.ErrorResp(c, err, 400)
+			return
+		}
+		filePath, err := utils.JoinUnderBase(reqPath, renameObject.SrcName)
+		if err != nil {
+			common.ErrorResp(c, err, 400)
+			return
+		}
+		if !canRenamePath(c, filePath) {
+			return
+		}
 		if err := fs.Rename(c, filePath, renameObject.NewName); err != nil {
 			common.ErrorResp(c, err, 500)
 			return
@@ -194,14 +219,19 @@ func FsRegexRename(c *gin.Context) {
 		return
 	}
 	user := c.MustGet("user").(*model.User)
-	if !user.CanRename() {
+	reqPath, err := user.JoinPath(req.SrcDir)
+	if err != nil {
+		common.ErrorResp(c, err, 403)
+		return
+	}
+	if !common.CheckPathLimitWithRoles(user, reqPath) {
 		common.ErrorResp(c, errs.PermissionDenied, 403)
 		return
 	}
 
-	reqPath, err := user.JoinPath(req.SrcDir)
-	if err != nil {
-		common.ErrorResp(c, err, 403)
+	perm := common.MergeRolePermissions(user, reqPath)
+	if !common.HasPermission(perm, common.PermRename) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
 		return
 	}
 
@@ -229,8 +259,19 @@ func FsRegexRename(c *gin.Context) {
 	for _, file := range files {
 
 		if srcRegexp.MatchString(file.GetName()) {
-			filePath := fmt.Sprintf("%s/%s", reqPath, file.GetName())
+			filePath, err := utils.JoinUnderBase(reqPath, file.GetName())
+			if err != nil {
+				common.ErrorResp(c, err, 500)
+				return
+			}
+			if !canRenamePath(c, filePath) {
+				return
+			}
 			newFileName := srcRegexp.ReplaceAllString(file.GetName(), req.NewNameRegex)
+			if err := utils.ValidateNameComponent(newFileName); err != nil {
+				common.ErrorResp(c, err, 400)
+				return
+			}
 			if err := fs.Rename(c, filePath, newFileName); err != nil {
 				common.ErrorResp(c, err, 500)
 				return

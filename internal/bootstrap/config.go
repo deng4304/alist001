@@ -70,6 +70,15 @@ func InitConfig() {
 	if !conf.Conf.Force {
 		confFromEnv()
 	}
+	if conf.Conf.TlsInsecureSkipVerify {
+		log.Warn("SECURITY WARNING / 安全警告:")
+		log.Warn("TLS certificate verification is disabled.")
+		log.Warn("TLS 证书校验已被禁用。")
+		log.Warn("This exposes all storage traffic to MitM attacks and may leak credentials or allow data tampering.")
+		log.Warn("这会使所有存储通信暴露于中间人攻击（MitM），可能导致凭据泄露和数据被篡改。")
+		log.Warn("Only use this setting if you fully understand the risks.")
+		log.Warn("仅在你完全理解风险的情况下使用该配置。")
+	}
 	// convert abs path
 	if !filepath.IsAbs(conf.Conf.TempDir) {
 		absPath, err := filepath.Abs(conf.Conf.TempDir)

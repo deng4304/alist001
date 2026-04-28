@@ -1,14 +1,17 @@
 package iso9660
 
 import (
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/alist-org/alist/v3/internal/archive/tool"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/stream"
+	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/kdomanski/iso9660"
-	"io"
-	"os"
-	stdpath "path"
-	"strings"
 )
 
 func getImage(ss *stream.SeekableStream) (*iso9660.Image, error) {
@@ -61,15 +64,26 @@ func toModelObj(file *iso9660.File) model.Obj {
 }
 
 func decompress(f *iso9660.File, path string, up model.UpdateProgress) error {
-	file, err := os.OpenFile(stdpath.Join(path, f.Name()), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	return decompressEntry(f.Reader(), f.Size(), path, f.Name(), up)
+}
+
+func decompressEntry(reader io.Reader, size int64, path, entryName string, up model.UpdateProgress) error {
+	dstPath, err := tool.SecureJoin(path, entryName)
+	if err != nil {
+		return err
+	}
+	if err = os.MkdirAll(filepath.Dir(dstPath), 0700); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	_, err = io.Copy(file, &stream.ReaderUpdatingProgress{
+	_, err = utils.CopyWithBuffer(file, &stream.ReaderUpdatingProgress{
 		Reader: &stream.SimpleReaderWithSize{
-			Reader: f.Reader(),
-			Size:   f.Size(),
+			Reader: reader,
+			Size:   size,
 		},
 		UpdateProgress: up,
 	})
@@ -83,7 +97,10 @@ func decompressAll(children []*iso9660.File, path string) error {
 			if err != nil {
 				return err
 			}
-			nextPath := stdpath.Join(path, child.Name())
+			nextPath, err := tool.SecureJoin(path, child.Name())
+			if err != nil {
+				return err
+			}
 			if err = os.MkdirAll(nextPath, 0700); err != nil {
 				return err
 			}

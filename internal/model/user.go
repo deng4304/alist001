@@ -17,20 +17,22 @@ const (
 	GENERAL = iota
 	GUEST   // only one exists
 	ADMIN
+	NEWGENERAL
 )
 
 const StaticHashSalt = "https://github.com/alist-org/alist"
 
 type User struct {
-	ID       uint   `json:"id" gorm:"primaryKey"`                      // unique key
-	Username string `json:"username" gorm:"unique" binding:"required"` // username
-	PwdHash  string `json:"-"`                                         // password hash
-	PwdTS    int64  `json:"-"`                                         // password timestamp
-	Salt     string `json:"-"`                                         // unique salt
-	Password string `json:"password"`                                  // password
-	BasePath string `json:"base_path"`                                 // base path
-	Role     int    `json:"role"`                                      // user's role
-	Disabled bool   `json:"disabled"`
+	ID          uint   `json:"id" gorm:"primaryKey"`                      // unique key
+	Username    string `json:"username" gorm:"unique" binding:"required"` // username
+	PwdHash     string `json:"-"`                                         // password hash
+	PwdTS       int64  `json:"-"`                                         // password timestamp
+	Salt        string `json:"-"`                                         // unique salt
+	Password    string `json:"password"`                                  // password
+	BasePath    string `json:"base_path"`                                 // base path
+	Role        Roles  `json:"role" gorm:"type:text"`                     // user's roles
+	RolesDetail []Role `json:"-" gorm:"-"`
+	Disabled    bool   `json:"disabled"`
 	// Determine permissions by bit
 	//   0:  can see hidden files
 	//   1:  can access without password
@@ -46,6 +48,9 @@ type User struct {
 	//   11: ftp/sftp write
 	//   12: can read archives
 	//   13: can decompress archives
+	//   14: check path limit
+	//   15: mcp read
+	//   16: mcp write
 	Permission int32  `json:"permission"`
 	OtpSecret  string `json:"-"`
 	SsoID      string `json:"sso_id"` // unique by sso platform
@@ -53,11 +58,11 @@ type User struct {
 }
 
 func (u *User) IsGuest() bool {
-	return u.Role == GUEST
+	return u.Role.Contains(GUEST)
 }
 
 func (u *User) IsAdmin() bool {
-	return u.Role == ADMIN
+	return u.Role.Contains(ADMIN)
 }
 
 func (u *User) ValidateRawPassword(password string) error {
@@ -137,8 +142,42 @@ func (u *User) CanDecompress() bool {
 	return (u.Permission>>13)&1 == 1
 }
 
+func (u *User) CheckPathLimit() bool {
+	return (u.Permission>>14)&1 == 1
+}
+
+func (u *User) CanMCPAccess() bool {
+	return (u.Permission>>15)&1 == 1
+}
+
+func (u *User) CanMCPManage() bool {
+	return (u.Permission>>16)&1 == 1
+}
+
 func (u *User) JoinPath(reqPath string) (string, error) {
-	return utils.JoinBasePath(u.BasePath, reqPath)
+	if reqPath == "/" {
+		return utils.FixAndCleanPath(u.BasePath), nil
+	}
+	path, err := utils.JoinBasePath(u.BasePath, reqPath)
+	if err != nil {
+		return "", err
+	}
+
+	if path != "/" && u.CheckPathLimit() {
+		basePaths := GetAllBasePathsFromRoles(u)
+		match := false
+		for _, base := range basePaths {
+			if utils.IsSubPath(base, path) {
+				match = true
+				break
+			}
+		}
+		if !match {
+			return "", errs.PermissionDenied
+		}
+	}
+
+	return path, nil
 }
 
 func StaticHash(password string) string {
@@ -177,5 +216,35 @@ func (u *User) WebAuthnCredentials() []webauthn.Credential {
 }
 
 func (u *User) WebAuthnIcon() string {
-	return "https://alist.nn.ci/logo.svg"
+	return "https://alistgo.com/logo.svg"
+}
+
+// FetchRole is used to load role details by id. It should be set by the op package
+// to avoid an import cycle between model and op.
+var FetchRole func(uint) (*Role, error)
+
+// GetAllBasePathsFromRoles returns all permission paths from user's roles
+func GetAllBasePathsFromRoles(u *User) []string {
+	basePaths := make([]string, 0)
+	seen := make(map[string]struct{})
+
+	for _, rid := range u.Role {
+		if FetchRole == nil {
+			continue
+		}
+		role, err := FetchRole(uint(rid))
+		if err != nil || role == nil {
+			continue
+		}
+		for _, entry := range role.PermissionScopes {
+			if entry.Path == "" {
+				continue
+			}
+			if _, ok := seen[entry.Path]; !ok {
+				basePaths = append(basePaths, entry.Path)
+				seen[entry.Path] = struct{}{}
+			}
+		}
+	}
+	return basePaths
 }

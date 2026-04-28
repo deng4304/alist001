@@ -10,12 +10,15 @@ const (
 
 const (
 	// site
-	VERSION      = "version"
-	SiteTitle    = "site_title"
-	Announcement = "announcement"
-	AllowIndexed = "allow_indexed"
-	AllowMounted = "allow_mounted"
-	RobotsTxt    = "robots_txt"
+	VERSION       = "version"
+	SiteTitle     = "site_title"
+	Announcement  = "announcement"
+	AllowIndexed  = "allow_indexed"
+	AllowMounted  = "allow_mounted"
+	RobotsTxt     = "robots_txt"
+	AllowRegister = "allow_register"
+	DefaultRole   = "default_role"
+	UseNewui      = "use_newui"
 
 	Logo      = "logo"
 	Favicon   = "favicon"
@@ -30,6 +33,7 @@ const (
 	ProxyIgnoreHeaders       = "proxy_ignore_headers"
 	AudioAutoplay            = "audio_autoplay"
 	VideoAutoplay            = "video_autoplay"
+	ThumbnailSize            = "thumbnail_size"
 	PreviewArchivesByDefault = "preview_archives_by_default"
 	ReadMeAutoRender         = "readme_autorender"
 	FilterReadMeScripts      = "filter_readme_scripts"
@@ -45,6 +49,9 @@ const (
 	ForwardDirectLinkParams = "forward_direct_link_params"
 	IgnoreDirectLinkParams  = "ignore_direct_link_params"
 	WebauthnLoginEnabled    = "webauthn_login_enabled"
+	MaxDevices              = "max_devices"
+	DeviceEvictPolicy       = "device_evict_policy"
+	DeviceSessionTTL        = "device_session_ttl"
 
 	// index
 	SearchIndex     = "search_index"
@@ -117,6 +124,21 @@ const (
 	FTPImplicitTLS       = "ftp_implicit_tls"
 	FTPTLSPrivateKeyPath = "ftp_tls_private_key_path"
 	FTPTLSPublicCertPath = "ftp_tls_public_cert_path"
+
+	// frp
+	FRPEnabled      = "frp_enabled"
+	FRPServerAddr   = "frp_server_addr"
+	FRPServerPort   = "frp_server_port"
+	FRPAuthToken    = "frp_auth_token"
+	FRPProxyName    = "frp_proxy_name"
+	FRPProxyType    = "frp_proxy_type"
+	FRPCustomDomain = "frp_custom_domain"
+	FRPSubdomain    = "frp_subdomain"
+	FRPRemotePort   = "frp_remote_port"
+	FRPLocalPort    = "frp_local_port"
+	FRPTLSEnable    = "frp_tls_enable"
+	FRPSTCPSecretKey = "frp_stcp_secret_key"
+	FRPStatus       = "frp_status"
 
 	// traffic
 	TaskOfflineDownloadThreadsNum         = "offline_download_task_threads_num"

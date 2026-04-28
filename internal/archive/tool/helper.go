@@ -1,10 +1,12 @@
 package tool
 
 import (
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	stdpath "path"
+	"path/filepath"
 	"strings"
 
 	"github.com/alist-org/alist/v3/internal/model"
@@ -119,7 +121,30 @@ func DecompressFromFolderTraversal(r ArchiveReader, outputPath string, args mode
 	if args.InnerPath == "/" {
 		for i, file := range files {
 			name := file.Name()
-			err = decompress(file, name, outputPath, args.Password)
+			info := file.FileInfo()
+			if info.IsDir() {
+				var dirPath string
+				dirPath, err = SecureJoin(outputPath, name)
+				if err != nil {
+					return err
+				}
+				if err = os.MkdirAll(dirPath, 0700); err != nil {
+					return err
+				}
+				continue
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("%w: %s", ErrArchiveIllegalPath, name)
+			}
+			var dstPath string
+			dstPath, err = SecureJoin(outputPath, name)
+			if err != nil {
+				return err
+			}
+			if err = os.MkdirAll(filepath.Dir(dstPath), 0700); err != nil {
+				return err
+			}
+			err = _decompress(file, dstPath, args.Password, func(_ float64) {})
 			if err != nil {
 				return err
 			}
@@ -129,25 +154,80 @@ func DecompressFromFolderTraversal(r ArchiveReader, outputPath string, args mode
 		innerPath := strings.TrimPrefix(args.InnerPath, "/")
 		innerBase := stdpath.Base(innerPath)
 		createdBaseDir := false
+		var baseDirPath string
 		for _, file := range files {
 			name := file.Name()
 			if name == innerPath {
-				err = _decompress(file, outputPath, args.Password, up)
+				info := file.FileInfo()
+				if info.IsDir() {
+					if !createdBaseDir {
+						baseDirPath, err = SecureJoin(outputPath, innerBase)
+						if err != nil {
+							return err
+						}
+						if err = os.MkdirAll(baseDirPath, 0700); err != nil {
+							return err
+						}
+						createdBaseDir = true
+					}
+					continue
+				}
+				if !info.Mode().IsRegular() {
+					return fmt.Errorf("%w: %s", ErrArchiveIllegalPath, name)
+				}
+				var dstPath string
+				dstPath, err = SecureJoin(outputPath, stdpath.Base(innerPath))
+				if err != nil {
+					return err
+				}
+				if err = os.MkdirAll(filepath.Dir(dstPath), 0700); err != nil {
+					return err
+				}
+				err = _decompress(file, dstPath, args.Password, up)
 				if err != nil {
 					return err
 				}
 				break
 			} else if strings.HasPrefix(name, innerPath+"/") {
-				targetPath := stdpath.Join(outputPath, innerBase)
 				if !createdBaseDir {
-					err = os.Mkdir(targetPath, 0700)
+					baseDirPath, err = SecureJoin(outputPath, innerBase)
+					if err != nil {
+						return err
+					}
+					err = os.MkdirAll(baseDirPath, 0700)
 					if err != nil {
 						return err
 					}
 					createdBaseDir = true
 				}
 				restPath := strings.TrimPrefix(name, innerPath+"/")
-				err = decompress(file, restPath, targetPath, args.Password)
+				if restPath == "" || restPath == "." {
+					continue
+				}
+				info := file.FileInfo()
+				if info.IsDir() {
+					var dirPath string
+					dirPath, err = SecureJoin(baseDirPath, restPath)
+					if err != nil {
+						return err
+					}
+					if err = os.MkdirAll(dirPath, 0700); err != nil {
+						return err
+					}
+					continue
+				}
+				if !info.Mode().IsRegular() {
+					return fmt.Errorf("%w: %s", ErrArchiveIllegalPath, name)
+				}
+				var dstPath string
+				dstPath, err = SecureJoin(baseDirPath, restPath)
+				if err != nil {
+					return err
+				}
+				if err = os.MkdirAll(filepath.Dir(dstPath), 0700); err != nil {
+					return err
+				}
+				err = _decompress(file, dstPath, args.Password, func(_ float64) {})
 				if err != nil {
 					return err
 				}
@@ -157,26 +237,7 @@ func DecompressFromFolderTraversal(r ArchiveReader, outputPath string, args mode
 	return nil
 }
 
-func decompress(file SubFile, filePath, outputPath, password string) error {
-	targetPath := outputPath
-	dir, base := stdpath.Split(filePath)
-	if dir != "" {
-		targetPath = stdpath.Join(targetPath, dir)
-		err := os.MkdirAll(targetPath, 0700)
-		if err != nil {
-			return err
-		}
-	}
-	if base != "" {
-		err := _decompress(file, targetPath, password, func(_ float64) {})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func _decompress(file SubFile, targetPath, password string, up model.UpdateProgress) error {
+func _decompress(file SubFile, dstPath, password string, up model.UpdateProgress) error {
 	if encrypt, ok := file.(CanEncryptSubFile); ok && encrypt.IsEncrypted() {
 		encrypt.SetPassword(password)
 	}
@@ -185,7 +246,7 @@ func _decompress(file SubFile, targetPath, password string, up model.UpdateProgr
 		return err
 	}
 	defer func() { _ = rc.Close() }()
-	f, err := os.OpenFile(stdpath.Join(targetPath, file.FileInfo().Name()), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}

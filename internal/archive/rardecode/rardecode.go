@@ -1,15 +1,18 @@
 package rardecode
 
 import (
+	"fmt"
+	"io"
+	"os"
+	stdpath "path"
+	"path/filepath"
+	"strings"
+
 	"github.com/alist-org/alist/v3/internal/archive/tool"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/stream"
 	"github.com/nwaples/rardecode/v2"
-	"io"
-	"os"
-	stdpath "path"
-	"strings"
 )
 
 type RarDecoder struct{}
@@ -85,7 +88,11 @@ func (RarDecoder) Decompress(ss []*stream.SeekableStream, outputPath string, arg
 			if header.IsDir {
 				name = name + "/"
 			}
-			err = decompress(reader, header, name, outputPath)
+			dstPath, e := tool.SecureJoin(outputPath, name)
+			if e != nil {
+				return e
+			}
+			err = decompress(reader, header, dstPath)
 			if err != nil {
 				return err
 			}
@@ -94,6 +101,7 @@ func (RarDecoder) Decompress(ss []*stream.SeekableStream, outputPath string, arg
 		innerPath := strings.TrimPrefix(args.InnerPath, "/")
 		innerBase := stdpath.Base(innerPath)
 		createdBaseDir := false
+		var baseDirPath string
 		for {
 			var header *rardecode.FileHeader
 			header, err = reader.Next()
@@ -108,22 +116,55 @@ func (RarDecoder) Decompress(ss []*stream.SeekableStream, outputPath string, arg
 				name = name + "/"
 			}
 			if name == innerPath {
-				err = _decompress(reader, header, outputPath, up)
+				if header.IsDir {
+					if !createdBaseDir {
+						baseDirPath, err = tool.SecureJoin(outputPath, innerBase)
+						if err != nil {
+							return err
+						}
+						if err = os.MkdirAll(baseDirPath, 0700); err != nil {
+							return err
+						}
+						createdBaseDir = true
+					}
+					continue
+				}
+				if !header.Mode().IsRegular() {
+					return fmt.Errorf("%w: %s", tool.ErrArchiveIllegalPath, header.Name)
+				}
+				dstPath, e := tool.SecureJoin(outputPath, stdpath.Base(innerPath))
+				if e != nil {
+					return e
+				}
+				if err = os.MkdirAll(filepath.Dir(dstPath), 0700); err != nil {
+					return err
+				}
+				err = _decompress(reader, header, dstPath, up)
 				if err != nil {
 					return err
 				}
 				break
 			} else if strings.HasPrefix(name, innerPath+"/") {
-				targetPath := stdpath.Join(outputPath, innerBase)
 				if !createdBaseDir {
-					err = os.Mkdir(targetPath, 0700)
+					baseDirPath, err = tool.SecureJoin(outputPath, innerBase)
+					if err != nil {
+						return err
+					}
+					err = os.MkdirAll(baseDirPath, 0700)
 					if err != nil {
 						return err
 					}
 					createdBaseDir = true
 				}
 				restPath := strings.TrimPrefix(name, innerPath+"/")
-				err = decompress(reader, header, restPath, targetPath)
+				if restPath == "" || restPath == "." {
+					continue
+				}
+				dstPath, e := tool.SecureJoin(baseDirPath, restPath)
+				if e != nil {
+					return e
+				}
+				err = decompress(reader, header, dstPath)
 				if err != nil {
 					return err
 				}

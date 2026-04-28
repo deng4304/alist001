@@ -33,28 +33,56 @@ type DirReq struct {
 }
 
 type ObjResp struct {
-	Id          string                     `json:"id"`
-	Path        string                     `json:"path"`
-	Name        string                     `json:"name"`
-	Size        int64                      `json:"size"`
-	IsDir       bool                       `json:"is_dir"`
-	Modified    time.Time                  `json:"modified"`
-	Created     time.Time                  `json:"created"`
-	Sign        string                     `json:"sign"`
-	Thumb       string                     `json:"thumb"`
-	Type        int                        `json:"type"`
-	HashInfoStr string                     `json:"hashinfo"`
-	HashInfo    map[*utils.HashType]string `json:"hash_info"`
+	Id           string                     `json:"id"`
+	Path         string                     `json:"path"`
+	Name         string                     `json:"name"`
+	Size         int64                      `json:"size"`
+	IsDir        bool                       `json:"is_dir"`
+	Modified     time.Time                  `json:"modified"`
+	Created      time.Time                  `json:"created"`
+	Sign         string                     `json:"sign"`
+	Thumb        string                     `json:"thumb"`
+	Type         int                        `json:"type"`
+	HashInfoStr  string                     `json:"hashinfo"`
+	HashInfo     map[*utils.HashType]string `json:"hash_info"`
+	StorageClass string                     `json:"storage_class,omitempty"`
 }
 
 type FsListResp struct {
-	Content  []ObjResp `json:"content"`
-	Total    int64     `json:"total"`
-	Readme   string    `json:"readme"`
-	Header   string    `json:"header"`
-	Write    bool      `json:"write"`
-	Provider string    `json:"provider"`
+	Content       []ObjLabelResp `json:"content"`
+	Total         int64          `json:"total"`
+	FilteredTotal int64          `json:"filtered_total"`
+	Page          int            `json:"page"`
+	PerPage       int            `json:"per_page"`
+	HasMore       bool           `json:"has_more"`
+	PagesTotal    int            `json:"pages_total"`
+	Readme        string         `json:"readme"`
+	Header        string         `json:"header"`
+	Write         bool           `json:"write"`
+	Provider      string         `json:"provider"`
 }
+
+type ObjLabelResp struct {
+	Id           string                     `json:"id"`
+	Path         string                     `json:"path"`
+	Name         string                     `json:"name"`
+	Size         int64                      `json:"size"`
+	IsDir        bool                       `json:"is_dir"`
+	Modified     time.Time                  `json:"modified"`
+	Created      time.Time                  `json:"created"`
+	Sign         string                     `json:"sign"`
+	Thumb        string                     `json:"thumb"`
+	Type         int                        `json:"type"`
+	HashInfoStr  string                     `json:"hashinfo"`
+	HashInfo     map[*utils.HashType]string `json:"hash_info"`
+	LabelList    []model.Label              `json:"label_list"`
+	StorageClass string                     `json:"storage_class,omitempty"`
+}
+
+const (
+	DefaultPerPage = 200
+	MaxPerPage     = 500
+)
 
 func FsList(c *gin.Context) {
 	var req ListReq
@@ -62,7 +90,9 @@ func FsList(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	req.Validate()
+	effPage, effPerPage := normalizeListPage(req.Page, req.PerPage)
+	req.Page = effPage
+	req.PerPage = effPerPage
 	user := c.MustGet("user").(*model.User)
 	reqPath, err := user.JoinPath(req.Path)
 	if err != nil {
@@ -77,32 +107,49 @@ func FsList(c *gin.Context) {
 		}
 	}
 	c.Set("meta", meta)
-	if !common.CanAccess(user, meta, reqPath, req.Password) {
+	if !common.CanAccessWithRoles(user, meta, reqPath, req.Password) {
 		common.ErrorStrResp(c, "password is incorrect or you have no permission", 403)
 		return
 	}
-	if !user.CanWrite() && !common.CanWrite(meta, reqPath) && req.Refresh {
+	perm := common.MergeRolePermissions(user, reqPath)
+	if !common.HasPermission(perm, common.PermWrite) && !common.CanWrite(meta, reqPath) && req.Refresh {
 		common.ErrorStrResp(c, "Refresh without permission", 403)
 		return
+	}
+	provider := "unknown"
+	storage, storageErr := fs.GetStorage(reqPath, &fs.GetStoragesArgs{})
+	if storageErr == nil {
+		provider = storage.GetStorage().Driver
 	}
 	objs, err := fs.List(c, reqPath, &fs.ListArgs{Refresh: req.Refresh})
 	if err != nil {
 		common.ErrorResp(c, err, 500)
 		return
 	}
-	total, objs := pagination(objs, &req.PageReq)
-	provider := "unknown"
-	storage, err := fs.GetStorage(reqPath, &fs.GetStoragesArgs{})
-	if err == nil {
-		provider = storage.GetStorage().Driver
+	filtered := make([]model.Obj, 0, len(objs))
+	for _, obj := range objs {
+		childPath := stdpath.Join(reqPath, obj.GetName())
+		if common.CanReadPathByRole(user, childPath) {
+			filtered = append(filtered, obj)
+		}
 	}
+	total, pageObjs := pagination(filtered, &req.PageReq)
+	respContent := toObjsResp(pageObjs, reqPath, isEncrypt(meta, reqPath))
+	pagesTotal := calcPagesTotal(total, req.PerPage)
+	hasMore := req.Page*req.PerPage < total
+
 	common.SuccessResp(c, FsListResp{
-		Content:  toObjsResp(objs, reqPath, isEncrypt(meta, reqPath)),
-		Total:    int64(total),
-		Readme:   getReadme(meta, reqPath),
-		Header:   getHeader(meta, reqPath),
-		Write:    user.CanWrite() || common.CanWrite(meta, reqPath),
-		Provider: provider,
+		Content:       respContent,
+		Total:         int64(total),
+		FilteredTotal: int64(total),
+		Page:          req.Page,
+		PerPage:       req.PerPage,
+		HasMore:       hasMore,
+		PagesTotal:    pagesTotal,
+		Readme:        getReadme(meta, reqPath),
+		Header:        getHeader(meta, reqPath),
+		Write:         common.HasPermission(perm, common.PermWrite) || common.CanWrite(meta, reqPath),
+		Provider:      provider,
 	})
 }
 
@@ -135,7 +182,7 @@ func FsDirs(c *gin.Context) {
 		}
 	}
 	c.Set("meta", meta)
-	if !common.CanAccess(user, meta, reqPath, req.Password) {
+	if !common.CanAccessWithRoles(user, meta, reqPath, req.Password) {
 		common.ErrorStrResp(c, "password is incorrect or you have no permission", 403)
 		return
 	}
@@ -144,7 +191,14 @@ func FsDirs(c *gin.Context) {
 		common.ErrorResp(c, err, 500)
 		return
 	}
-	dirs := filterDirs(objs)
+	visible := make([]model.Obj, 0, len(objs))
+	for _, obj := range objs {
+		childPath := stdpath.Join(reqPath, obj.GetName())
+		if common.CanReadPathByRole(user, childPath) {
+			visible = append(visible, obj)
+		}
+	}
+	dirs := filterDirs(visible)
 	common.SuccessResp(c, dirs)
 }
 
@@ -193,6 +247,28 @@ func isEncrypt(meta *model.Meta, path string) bool {
 	return true
 }
 
+func normalizeListPage(page, perPage int) (int, int) {
+	effPage := page
+	if effPage <= 0 {
+		effPage = 1
+	}
+	effPerPage := perPage
+	if effPerPage <= 0 {
+		effPerPage = DefaultPerPage
+	}
+	if effPerPage > MaxPerPage {
+		effPerPage = MaxPerPage
+	}
+	return effPage, effPerPage
+}
+
+func calcPagesTotal(total, perPage int) int {
+	if total <= 0 || perPage <= 0 {
+		return 0
+	}
+	return (total + perPage - 1) / perPage
+}
+
 func pagination(objs []model.Obj, req *model.PageReq) (int, []model.Obj) {
 	pageIndex, pageSize := req.Page, req.PerPage
 	total := len(objs)
@@ -207,23 +283,40 @@ func pagination(objs []model.Obj, req *model.PageReq) (int, []model.Obj) {
 	return total, objs[start:end]
 }
 
-func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
-	var resp []ObjResp
+func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjLabelResp {
+	var resp []ObjLabelResp
+
+	names := make([]string, 0, len(objs))
 	for _, obj := range objs {
+		if !obj.IsDir() {
+			names = append(names, obj.GetName())
+		}
+	}
+
+	labelsByName, _ := op.GetLabelsByFileNamesPublic(names)
+
+	for _, obj := range objs {
+		var labels []model.Label
+		if !obj.IsDir() {
+			labels = labelsByName[obj.GetName()]
+		}
 		thumb, _ := model.GetThumb(obj)
-		resp = append(resp, ObjResp{
-			Id:          obj.GetID(),
-			Path:        obj.GetPath(),
-			Name:        obj.GetName(),
-			Size:        obj.GetSize(),
-			IsDir:       obj.IsDir(),
-			Modified:    obj.ModTime(),
-			Created:     obj.CreateTime(),
-			HashInfoStr: obj.GetHash().String(),
-			HashInfo:    obj.GetHash().Export(),
-			Sign:        common.Sign(obj, parent, encrypt),
-			Thumb:       thumb,
-			Type:        utils.GetObjType(obj.GetName(), obj.IsDir()),
+		storageClass, _ := model.GetStorageClass(obj)
+		resp = append(resp, ObjLabelResp{
+			Id:           obj.GetID(),
+			Path:         obj.GetPath(),
+			Name:         obj.GetName(),
+			Size:         obj.GetSize(),
+			IsDir:        obj.IsDir(),
+			Modified:     obj.ModTime(),
+			Created:      obj.CreateTime(),
+			HashInfoStr:  obj.GetHash().String(),
+			HashInfo:     obj.GetHash().Export(),
+			Sign:         common.Sign(obj, parent, encrypt),
+			Thumb:        thumb,
+			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
+			LabelList:    labels,
+			StorageClass: storageClass,
 		})
 	}
 	return resp
@@ -236,11 +329,11 @@ type FsGetReq struct {
 
 type FsGetResp struct {
 	ObjResp
-	RawURL   string    `json:"raw_url"`
-	Readme   string    `json:"readme"`
-	Header   string    `json:"header"`
-	Provider string    `json:"provider"`
-	Related  []ObjResp `json:"related"`
+	RawURL   string         `json:"raw_url"`
+	Readme   string         `json:"readme"`
+	Header   string         `json:"header"`
+	Provider string         `json:"provider"`
+	Related  []ObjLabelResp `json:"related"`
 }
 
 func FsGet(c *gin.Context) {
@@ -263,7 +356,7 @@ func FsGet(c *gin.Context) {
 		}
 	}
 	c.Set("meta", meta)
-	if !common.CanAccess(user, meta, reqPath, req.Password) {
+	if !common.CanAccessWithRoles(user, meta, reqPath, req.Password) {
 		common.ErrorStrResp(c, "password is incorrect or you have no permission", 403)
 		return
 	}
@@ -284,16 +377,27 @@ func FsGet(c *gin.Context) {
 			common.ErrorResp(c, err, 500)
 			return
 		}
-		if storage.Config().MustProxy() || storage.GetStorage().WebProxy {
-			query := ""
-			if isEncrypt(meta, reqPath) || setting.GetBool(conf.SignAll) {
-				query = "?sign=" + sign.Sign(reqPath)
-			}
+		query := ""
+		if isEncrypt(meta, reqPath) || setting.GetBool(conf.SignAll) {
+			query = "?sign=" + sign.Sign(reqPath)
+		}
+		forceRedirectRawURL := storage.GetStorage().Driver == "BaiduYouth"
+		forceProxyRawURL := storage.GetStorage().Driver == "Quark" && utils.GetFileType(obj.GetName()) == conf.VIDEO
+		if forceRedirectRawURL {
+			// Baidu Youth direct links are minted per request and are not stable enough
+			// to expose as fs/get raw_url. Return the local /d endpoint so the frontend
+			// obtains a fresh link on each download click.
+			rawURL = fmt.Sprintf("%s/d%s%s",
+				common.GetApiUrl(c.Request),
+				utils.EncodePath(reqPath, true),
+				query)
+		} else if storage.Config().MustProxy() || storage.GetStorage().WebProxy || forceProxyRawURL {
 			if storage.GetStorage().DownProxyUrl != "" {
-				rawURL = fmt.Sprintf("%s%s?sign=%s",
-					strings.Split(storage.GetStorage().DownProxyUrl, "\n")[0],
-					utils.EncodePath(reqPath, true),
-					sign.Sign(reqPath))
+				rawURL = common.BuildDownProxyURL(
+					storage.GetStorage().DownProxyUrl,
+					reqPath,
+					storage.GetStorage().DownProxySign,
+				)
 			} else {
 				rawURL = fmt.Sprintf("%s/p%s%s",
 					common.GetApiUrl(c.Request),
@@ -328,20 +432,22 @@ func FsGet(c *gin.Context) {
 	}
 	parentMeta, _ := op.GetNearestMeta(parentPath)
 	thumb, _ := model.GetThumb(obj)
+	storageClass, _ := model.GetStorageClass(obj)
 	common.SuccessResp(c, FsGetResp{
 		ObjResp: ObjResp{
-			Id:          obj.GetID(),
-			Path:        obj.GetPath(),
-			Name:        obj.GetName(),
-			Size:        obj.GetSize(),
-			IsDir:       obj.IsDir(),
-			Modified:    obj.ModTime(),
-			Created:     obj.CreateTime(),
-			HashInfoStr: obj.GetHash().String(),
-			HashInfo:    obj.GetHash().Export(),
-			Sign:        common.Sign(obj, parentPath, isEncrypt(meta, reqPath)),
-			Type:        utils.GetFileType(obj.GetName()),
-			Thumb:       thumb,
+			Id:           obj.GetID(),
+			Path:         obj.GetPath(),
+			Name:         obj.GetName(),
+			Size:         obj.GetSize(),
+			IsDir:        obj.IsDir(),
+			Modified:     obj.ModTime(),
+			Created:      obj.CreateTime(),
+			HashInfoStr:  obj.GetHash().String(),
+			HashInfo:     obj.GetHash().Export(),
+			Sign:         common.Sign(obj, parentPath, isEncrypt(meta, reqPath)),
+			Type:         utils.GetFileType(obj.GetName()),
+			Thumb:        thumb,
+			StorageClass: storageClass,
 		},
 		RawURL:   rawURL,
 		Readme:   getReadme(meta, reqPath),
@@ -391,7 +497,7 @@ func FsOther(c *gin.Context) {
 		}
 	}
 	c.Set("meta", meta)
-	if !common.CanAccess(user, meta, req.Path, req.Password) {
+	if !common.CanAccessWithRoles(user, meta, req.Path, req.Password) {
 		common.ErrorStrResp(c, "password is incorrect or you have no permission", 403)
 		return
 	}

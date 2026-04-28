@@ -3,12 +3,22 @@ package handles
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"image/png"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/Xhofe/go-cache"
+	"github.com/alist-org/alist/v3/internal/conf"
+	"github.com/alist-org/alist/v3/internal/device"
+	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/op"
+	"github.com/alist-org/alist/v3/internal/session"
+	"github.com/alist-org/alist/v3/internal/setting"
+	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/alist-org/alist/v3/server/common"
 	"github.com/gin-gonic/gin"
 	"github.com/pquerna/otp/totp"
@@ -16,8 +26,9 @@ import (
 
 var loginCache = cache.NewMemCache[int]()
 var (
-	defaultDuration = time.Minute * 5
-	defaultTimes    = 5
+	defaultDuration            = time.Minute * 5
+	defaultTimes               = 5
+	invalidLoginCredentialsMsg = "username or password is incorrect"
 )
 
 type LoginReq struct {
@@ -59,13 +70,13 @@ func loginHash(c *gin.Context, req *LoginReq) {
 	// check username
 	user, err := op.GetUserByName(req.Username)
 	if err != nil {
-		common.ErrorResp(c, err, 400)
+		common.ErrorStrResp(c, invalidLoginCredentialsMsg, 400)
 		loginCache.Set(ip, count+1)
 		return
 	}
 	// validate password hash
 	if err := user.ValidatePwdStaticHash(req.Password); err != nil {
-		common.ErrorResp(c, err, 400)
+		common.ErrorStrResp(c, invalidLoginCredentialsMsg, 400)
 		loginCache.Set(ip, count+1)
 		return
 	}
@@ -77,25 +88,74 @@ func loginHash(c *gin.Context, req *LoginReq) {
 			return
 		}
 	}
+
+	clientID := c.GetHeader("Client-Id")
+	if clientID == "" {
+		clientID = c.Query("client_id")
+	}
+	key := utils.GetMD5EncodeStr(fmt.Sprintf("%d-%s",
+		user.ID, clientID))
+
+	if err := device.EnsureActiveOnLogin(user.ID, key, c.Request.UserAgent(), c.ClientIP()); err != nil {
+		if errors.Is(err, errs.TooManyDevices) {
+			common.ErrorResp(c, err, 403)
+		} else {
+			common.ErrorResp(c, err, 400, true)
+		}
+		return
+	}
+
 	// generate token
 	token, err := common.GenerateToken(user)
 	if err != nil {
 		common.ErrorResp(c, err, 400, true)
 		return
 	}
-	common.SuccessResp(c, gin.H{"token": token})
+	common.SuccessResp(c, gin.H{"token": token, "device_key": key})
 	loginCache.Del(ip)
+}
+
+type RegisterReq struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+// Register a new user
+func Register(c *gin.Context) {
+	if !setting.GetBool(conf.AllowRegister) {
+		common.ErrorStrResp(c, "registration is disabled", 403)
+		return
+	}
+	var req RegisterReq
+	if err := c.ShouldBind(&req); err != nil {
+		common.ErrorResp(c, err, 400)
+		return
+	}
+	user := &model.User{
+		Username: req.Username,
+		Role:     model.Roles{op.GetDefaultRoleID()},
+		Authn:    "[]",
+	}
+	user.SetPassword(req.Password)
+	if err := op.CreateUser(user); err != nil {
+		common.ErrorResp(c, err, 500, true)
+		return
+	}
+	common.SuccessResp(c)
 }
 
 type UserResp struct {
 	model.User
-	Otp bool `json:"otp"`
+	Otp         bool                    `json:"otp"`
+	RoleNames   []string                `json:"role_names"`
+	Permissions []model.PermissionEntry `json:"permissions"`
 }
 
 // CurrentUser get current user by token
 // if token is empty, return guest user
 func CurrentUser(c *gin.Context) {
 	user := c.MustGet("user").(*model.User)
+
 	userResp := UserResp{
 		User: *user,
 	}
@@ -103,6 +163,30 @@ func CurrentUser(c *gin.Context) {
 	if userResp.OtpSecret != "" {
 		userResp.Otp = true
 	}
+
+	var roleNames []string
+	permMap := map[string]int32{}
+	paths := make([]string, 0)
+
+	for _, role := range user.RolesDetail {
+		roleNames = append(roleNames, role.Name)
+		for _, entry := range role.PermissionScopes {
+			cleanPath := path.Clean("/" + strings.TrimPrefix(entry.Path, "/"))
+			if _, ok := permMap[cleanPath]; !ok {
+				paths = append(paths, cleanPath)
+			}
+			permMap[cleanPath] |= entry.Permission
+		}
+	}
+	userResp.RoleNames = roleNames
+
+	for _, fullPath := range paths {
+		userResp.Permissions = append(userResp.Permissions, model.PermissionEntry{
+			Path:       fullPath,
+			Permission: permMap[fullPath],
+		})
+	}
+
 	common.SuccessResp(c, userResp)
 }
 
@@ -113,6 +197,10 @@ func UpdateCurrent(c *gin.Context) {
 		return
 	}
 	user := c.MustGet("user").(*model.User)
+	if user.IsGuest() {
+		common.ErrorStrResp(c, "Guest user can not update profile", 403)
+		return
+	}
 	user.Username = req.Username
 	if req.Password != "" {
 		user.SetPassword(req.Password)
@@ -183,6 +271,13 @@ func Verify2FA(c *gin.Context) {
 }
 
 func LogOut(c *gin.Context) {
+	if keyVal, ok := c.Get("device_key"); ok {
+		if err := session.MarkInactive(keyVal.(string)); err != nil {
+			common.ErrorResp(c, err, 500)
+			return
+		}
+		c.Set("session_inactive", true)
+	}
 	err := common.InvalidateToken(c.GetHeader("Authorization"))
 	if err != nil {
 		common.ErrorResp(c, err, 500)

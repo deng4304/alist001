@@ -41,11 +41,28 @@ func GetStorageByMountPath(mountPath string) (driver.Driver, error) {
 	return storageDriver, nil
 }
 
+func firstPathSegment(p string) string {
+	p = utils.FixAndCleanPath(p)
+	p = strings.TrimPrefix(p, "/")
+	if p == "" {
+		return ""
+	}
+	if i := strings.Index(p, "/"); i >= 0 {
+		return p[:i]
+	}
+	return p
+}
+
 // CreateStorage Save the storage to database so storage can get an id
 // then instantiate corresponding driver and save it in memory
 func CreateStorage(ctx context.Context, storage model.Storage) (uint, error) {
 	storage.Modified = time.Now()
 	storage.MountPath = utils.FixAndCleanPath(storage.MountPath)
+
+	//if storage.MountPath == "/" {
+	//	return 0, errors.New("Mount path cannot be '/'")
+	//}
+
 	var err error
 	// check driver first
 	driverName := storage.Driver
@@ -205,6 +222,9 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
 	}
 	storage.Modified = time.Now()
 	storage.MountPath = utils.FixAndCleanPath(storage.MountPath)
+	//if storage.MountPath == "/" {
+	//	return errors.New("Mount path cannot be '/'")
+	//}
 	err = db.UpdateStorage(&storage)
 	if err != nil {
 		return errors.WithMessage(err, "failed update storage in database")
@@ -216,6 +236,29 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
 	if oldStorage.MountPath != storage.MountPath {
 		// mount path renamed, need to drop the storage
 		storagesMap.Delete(oldStorage.MountPath)
+		modifiedRoleIDs, err := db.UpdateRolePermissionsPathPrefix(oldStorage.MountPath, storage.MountPath)
+		if err != nil {
+			return errors.WithMessage(err, "failed to update role permissions")
+		}
+		for _, id := range modifiedRoleIDs {
+			roleCache.Del(fmt.Sprint(id))
+		}
+
+		//modifiedUsernames, err := db.UpdateUserBasePathPrefix(oldStorage.MountPath, storage.MountPath)
+		//if err != nil {
+		//	return errors.WithMessage(err, "failed to update user base path")
+		//}
+		for _, id := range modifiedRoleIDs {
+			roleCache.Del(fmt.Sprint(id))
+
+			users, err := db.GetUsersByRole(int(id))
+			if err != nil {
+				return errors.WithMessage(err, "failed to get users by role")
+			}
+			for _, user := range users {
+				userCache.Del(user.Username)
+			}
+		}
 	}
 	if err != nil {
 		return errors.WithMessage(err, "failed get storage driver")
@@ -235,6 +278,34 @@ func DeleteStorageById(ctx context.Context, id uint) error {
 	storage, err := db.GetStorageById(id)
 	if err != nil {
 		return errors.WithMessage(err, "failed get storage")
+	}
+	firstMount := firstPathSegment(storage.MountPath)
+	if firstMount != "" {
+		roles, err := db.GetAllRoles()
+		if err != nil {
+			return errors.WithMessage(err, "failed to load roles")
+		}
+		users, err := db.GetAllUsers()
+		if err != nil {
+			return errors.WithMessage(err, "failed to load users")
+		}
+		var usedBy []string
+		for _, r := range roles {
+			for _, entry := range r.PermissionScopes {
+				if firstPathSegment(entry.Path) == firstMount {
+					usedBy = append(usedBy, "role:"+r.Name)
+					break
+				}
+			}
+		}
+		for _, u := range users {
+			if firstPathSegment(u.BasePath) == firstMount {
+				usedBy = append(usedBy, "user:"+u.Username)
+			}
+		}
+		if len(usedBy) > 0 {
+			return errors.Errorf("storage is used by %s, please cancel usage first", strings.Join(usedBy, ", "))
+		}
 	}
 	if !storage.Disabled {
 		storageDriver, err := GetStorageByMountPath(storage.MountPath)

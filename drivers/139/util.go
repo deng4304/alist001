@@ -67,6 +67,7 @@ func (d *Yun139) refreshToken() error {
 	if len(splits) < 3 {
 		return fmt.Errorf("authorization is invalid, splits < 3")
 	}
+	d.Account = splits[1]
 	strs := strings.Split(splits[2], "|")
 	if len(strs) < 4 {
 		return fmt.Errorf("authorization is invalid, strs < 4")
@@ -156,6 +157,104 @@ func (d *Yun139) request(pathname string, method string, callback base.ReqCallba
 	}
 	return res.Body(), nil
 }
+
+func (d *Yun139) requestRoute(data interface{}, resp interface{}) ([]byte, error) {
+	url := "https://user-njs.yun.139.com/user/route/qryRoutePolicy"
+	req := base.RestyClient.R()
+	randStr := random.String(16)
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	callback := func(req *resty.Request) {
+		req.SetBody(data)
+	}
+	if callback != nil {
+		callback(req)
+	}
+	body, err := utils.Json.Marshal(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	sign := calSign(string(body), ts, randStr)
+	svcType := "1"
+	if d.isFamily() {
+		svcType = "2"
+	}
+	req.SetHeaders(map[string]string{
+		"Accept":         "application/json, text/plain, */*",
+		"CMS-DEVICE":     "default",
+		"Authorization":  "Basic " + d.getAuthorization(),
+		"mcloud-channel": "1000101",
+		"mcloud-client":  "10701",
+		//"mcloud-route": "001",
+		"mcloud-sign": fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
+		//"mcloud-skey":"",
+		"mcloud-version":         "7.14.0",
+		"Origin":                 "https://yun.139.com",
+		"Referer":                "https://yun.139.com/w/",
+		"x-DeviceInfo":           "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
+		"x-huawei-channelSrc":    "10000034",
+		"x-inner-ntwk":           "2",
+		"x-m4c-caller":           "PC",
+		"x-m4c-src":              "10002",
+		"x-SvcType":              svcType,
+		"Inner-Hcy-Router-Https": "1",
+	})
+
+	var e BaseResp
+	req.SetResult(&e)
+	res, err := req.Execute(http.MethodPost, url)
+	log.Debugln(res.String())
+	if !e.Success {
+		return nil, errors.New(e.Message)
+	}
+	if resp != nil {
+		err = utils.Json.Unmarshal(res.Body(), resp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res.Body(), nil
+}
+
+func (d *Yun139) ensurePersonalCloudHost() error {
+	if d.ref != nil {
+		return d.ref.ensurePersonalCloudHost()
+	}
+	if d.PersonalCloudHost != "" {
+		return nil
+	}
+	if len(d.Authorization) == 0 {
+		return fmt.Errorf("authorization is empty")
+	}
+	if d.Account == "" {
+		if err := d.refreshToken(); err != nil {
+			return err
+		}
+	}
+
+	var resp QueryRoutePolicyResp
+	_, err := d.requestRoute(base.Json{
+		"userInfo": base.Json{
+			"userType":    1,
+			"accountType": 1,
+			"accountName": d.Account,
+		},
+		"modAddrType": 1,
+	}, &resp)
+	if err != nil {
+		return err
+	}
+	for _, policyItem := range resp.Data.RoutePolicyList {
+		if policyItem.ModName == "personal" && policyItem.HttpsUrl != "" {
+			d.PersonalCloudHost = strings.TrimRight(policyItem.HttpsUrl, "/")
+			break
+		}
+	}
+	if d.PersonalCloudHost == "" {
+		return fmt.Errorf("personal cloud host is empty")
+	}
+	return nil
+}
+
 func (d *Yun139) post(pathname string, data interface{}, resp interface{}) ([]byte, error) {
 	return d.request(pathname, http.MethodPost, func(req *resty.Request) {
 		req.SetBody(data)
@@ -390,7 +489,10 @@ func unicode(str string) string {
 }
 
 func (d *Yun139) personalRequest(pathname string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
-	url := "https://personal-kd-njs.yun.139.com" + pathname
+	if err := d.ensurePersonalCloudHost(); err != nil {
+		return nil, err
+	}
+	url := d.getPersonalCloudHost() + pathname
 	req := base.RestyClient.R()
 	randStr := random.String(16)
 	ts := time.Now().Format("2006-01-02 15:04:05")
@@ -416,8 +518,6 @@ func (d *Yun139) personalRequest(pathname string, method string, callback base.R
 		"Mcloud-Route":         "001",
 		"Mcloud-Sign":          fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
 		"Mcloud-Version":       "7.14.0",
-		"Origin":               "https://yun.139.com",
-		"Referer":              "https://yun.139.com/w/",
 		"x-DeviceInfo":         "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
 		"x-huawei-channelSrc":  "10000034",
 		"x-inner-ntwk":         "2",
@@ -479,7 +579,7 @@ func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 			"parentFileId": fileId,
 		}
 		var resp PersonalListResp
-		_, err := d.personalPost("/hcy/file/list", data, &resp)
+		_, err := d.personalPost("/file/list", data, &resp)
 		if err != nil {
 			return nil, err
 		}
@@ -499,7 +599,15 @@ func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 			} else {
 				var Thumbnails = item.Thumbnails
 				var ThumbnailUrl string
-				if len(Thumbnails) > 0 {
+				if d.UseLargeThumbnail {
+					for _, thumb := range Thumbnails {
+						if strings.Contains(thumb.Style, "Large") {
+							ThumbnailUrl = thumb.Url
+							break
+						}
+					}
+				}
+				if ThumbnailUrl == "" && len(Thumbnails) > 0 {
 					ThumbnailUrl = Thumbnails[len(Thumbnails)-1].Url
 				}
 				f = &model.ObjThumb{
@@ -527,7 +635,7 @@ func (d *Yun139) personalGetLink(fileId string) (string, error) {
 	data := base.Json{
 		"fileId": fileId,
 	}
-	res, err := d.personalPost("/hcy/file/getDownloadUrl",
+	res, err := d.personalPost("/file/getDownloadUrl",
 		data, nil)
 	if err != nil {
 		return "", err
@@ -551,4 +659,10 @@ func (d *Yun139) getAccount() string {
 		return d.ref.getAccount()
 	}
 	return d.Account
+}
+func (d *Yun139) getPersonalCloudHost() string {
+	if d.ref != nil {
+		return d.ref.getPersonalCloudHost()
+	}
+	return d.PersonalCloudHost
 }

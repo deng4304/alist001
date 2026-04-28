@@ -131,7 +131,7 @@ func ladpRegister(username string) (*model.User, error) {
 		Password:   random.String(16),
 		Permission: int32(setting.GetInt(conf.LdapDefaultPermission, 0)),
 		BasePath:   setting.GetStr(conf.LdapDefaultDir),
-		Role:       0,
+		Role:       nil,
 		Disabled:   false,
 	}
 	if err := db.CreateUser(user); err != nil {
@@ -150,7 +150,7 @@ func dial(ldapServer string) (*ldap.Conn, error) {
 	}
 
 	if tlsEnabled {
-		return ldap.DialTLS("tcp", ldapServer, &tls.Config{InsecureSkipVerify: true})
+		return ldap.DialTLS("tcp", ldapServer, &tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify})
 	} else {
 		return ldap.Dial("tcp", ldapServer)
 	}

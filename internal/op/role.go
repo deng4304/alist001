@@ -1,0 +1,225 @@
+package op
+
+import (
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/Xhofe/go-cache"
+	"github.com/alist-org/alist/v3/internal/conf"
+	"github.com/alist-org/alist/v3/internal/db"
+	"github.com/alist-org/alist/v3/internal/errs"
+	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/alist-org/alist/v3/pkg/singleflight"
+	"github.com/alist-org/alist/v3/pkg/utils"
+)
+
+var roleCache = cache.NewMemCache[*model.Role](cache.WithShards[*model.Role](2))
+var roleG singleflight.Group[*model.Role]
+
+func init() {
+	model.FetchRole = GetRole
+}
+
+func enforceAdminRoleDefaults(r *model.Role) error {
+	if r == nil || r.Name != "admin" {
+		return nil
+	}
+	if len(r.PermissionScopes) == 1 {
+		scopePath := utils.FixAndCleanPath(r.PermissionScopes[0].Path)
+		if scopePath == "/" && r.PermissionScopes[0].Permission == 0xFFFF {
+			r.PermissionScopes[0].Path = "/"
+			return nil
+		}
+	}
+
+	r.PermissionScopes = []model.PermissionEntry{
+		{Path: "/", Permission: 0xFFFF},
+	}
+	return db.UpdateRole(r)
+}
+
+func GetRole(id uint) (*model.Role, error) {
+	key := fmt.Sprint(id)
+	if r, ok := roleCache.Get(key); ok {
+		return r, nil
+	}
+	r, err, _ := roleG.Do(key, func() (*model.Role, error) {
+		_r, err := db.GetRole(id)
+		if err != nil {
+			return nil, err
+		}
+		if err := enforceAdminRoleDefaults(_r); err != nil {
+			return nil, err
+		}
+		roleCache.Set(key, _r, cache.WithEx[*model.Role](time.Hour))
+		roleCache.Set(_r.Name, _r, cache.WithEx[*model.Role](time.Hour))
+		return _r, nil
+	})
+	return r, err
+}
+
+func GetRoleByName(name string) (*model.Role, error) {
+	if r, ok := roleCache.Get(name); ok {
+		return r, nil
+	}
+	r, err, _ := roleG.Do(name, func() (*model.Role, error) {
+		_r, err := db.GetRoleByName(name)
+		if err != nil {
+			return nil, err
+		}
+		if err := enforceAdminRoleDefaults(_r); err != nil {
+			return nil, err
+		}
+		roleCache.Set(name, _r, cache.WithEx[*model.Role](time.Hour))
+		roleCache.Set(fmt.Sprint(_r.ID), _r, cache.WithEx[*model.Role](time.Hour))
+		return _r, nil
+	})
+	return r, err
+}
+
+func GetDefaultRoleID() int {
+	item, err := GetSettingItemByKey(conf.DefaultRole)
+	if err == nil && item != nil && item.Value != "" {
+		if id, err := strconv.Atoi(item.Value); err == nil && id != 0 {
+			return id
+		}
+		if r, err := db.GetRoleByName(item.Value); err == nil {
+			return int(r.ID)
+		}
+	}
+	var r model.Role
+	if err := db.GetDb().Where("`default` = ?", true).First(&r).Error; err == nil {
+		return int(r.ID)
+	}
+	return int(model.GUEST)
+}
+
+func GetRolesByUserID(userID uint) ([]model.Role, error) {
+	user, err := GetUserById(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	var roles []model.Role
+	for _, roleID := range user.Role {
+		key := fmt.Sprint(roleID)
+
+		if r, ok := roleCache.Get(key); ok {
+			roles = append(roles, *r)
+			continue
+		}
+
+		r, err, _ := roleG.Do(key, func() (*model.Role, error) {
+			_r, err := db.GetRole(uint(roleID))
+			if err != nil {
+				return nil, err
+			}
+			if err := enforceAdminRoleDefaults(_r); err != nil {
+				return nil, err
+			}
+			roleCache.Set(key, _r, cache.WithEx[*model.Role](time.Hour))
+			roleCache.Set(_r.Name, _r, cache.WithEx[*model.Role](time.Hour))
+			return _r, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		roles = append(roles, *r)
+	}
+
+	return roles, nil
+}
+
+func GetRoles(pageIndex, pageSize int) ([]model.Role, int64, error) {
+	return db.GetRoles(pageIndex, pageSize)
+}
+
+func CreateRole(r *model.Role) error {
+	for i := range r.PermissionScopes {
+		r.PermissionScopes[i].Path = utils.FixAndCleanPath(r.PermissionScopes[i].Path)
+	}
+	roleCache.Del(fmt.Sprint(r.ID))
+	roleCache.Del(r.Name)
+	if err := db.CreateRole(r); err != nil {
+		return err
+	}
+	if r.Default {
+		roleCache.Clear()
+		item, err := GetSettingItemByKey(conf.DefaultRole)
+		if err != nil {
+			return err
+		}
+		item.Value = strconv.Itoa(int(r.ID))
+		if err := SaveSettingItem(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func UpdateRole(r *model.Role) error {
+	old, err := db.GetRole(r.ID)
+	if err != nil {
+		return err
+	}
+	switch old.Name {
+	case "admin":
+		return errs.ErrChangeDefaultRole
+	case "guest":
+		r.Name = "guest"
+	}
+	for i := range r.PermissionScopes {
+		r.PermissionScopes[i].Path = utils.FixAndCleanPath(r.PermissionScopes[i].Path)
+	}
+	//if len(old.PermissionScopes) > 0 && len(r.PermissionScopes) > 0 &&
+	//	old.PermissionScopes[0].Path != r.PermissionScopes[0].Path {
+	//
+	//	oldPath := old.PermissionScopes[0].Path
+	//	newPath := r.PermissionScopes[0].Path
+	//
+	//	users, err := db.GetUsersByRole(int(r.ID))
+	//	if err != nil {
+	//		return errors.WithMessage(err, "failed to get users by role")
+	//	}
+	//
+	//	modifiedUsernames, err := db.UpdateUserBasePathPrefix(oldPath, newPath, users)
+	//	if err != nil {
+	//		return errors.WithMessage(err, "failed to update user base path when role updated")
+	//	}
+	//
+	//	for _, name := range modifiedUsernames {
+	//		userCache.Del(name)
+	//	}
+	//}
+	roleCache.Del(fmt.Sprint(r.ID))
+	roleCache.Del(r.Name)
+	if err := db.UpdateRole(r); err != nil {
+		return err
+	}
+	if r.Default {
+		roleCache.Clear()
+		item, err := GetSettingItemByKey(conf.DefaultRole)
+		if err != nil {
+			return err
+		}
+		item.Value = strconv.Itoa(int(r.ID))
+		if err := SaveSettingItem(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func DeleteRole(id uint) error {
+	old, err := db.GetRole(id)
+	if err != nil {
+		return err
+	}
+	if old.Name == "admin" || old.Name == "guest" {
+		return errs.ErrChangeDefaultRole
+	}
+	roleCache.Del(fmt.Sprint(id))
+	roleCache.Del(old.Name)
+	return db.DeleteRole(id)
+}

@@ -4,23 +4,21 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"net/http"
 	stdpath "path"
 	"strconv"
-	"strings"
 
 	"github.com/alist-org/alist/v3/internal/conf"
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/fs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/setting"
-	"github.com/alist-org/alist/v3/internal/sign"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/alist-org/alist/v3/server/common"
 	"github.com/gin-gonic/gin"
 	"github.com/microcosm-cc/bluemonday"
 	log "github.com/sirupsen/logrus"
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 )
 
 func Down(c *gin.Context) {
@@ -58,15 +56,26 @@ func Proxy(c *gin.Context) {
 		common.ErrorResp(c, err, 500)
 		return
 	}
+	if c.Query("type") == "preview" && storage.GetStorage().Driver == "DoubaoNew" {
+		// Force proxy for DoubaoNew preview so headers are preserved.
+		link, file, err := fs.Link(c, rawPath, model.LinkArgs{
+			Header:  c.Request.Header,
+			Type:    c.Query("type"),
+			HttpReq: c.Request,
+		})
+		if err != nil {
+			common.ErrorResp(c, err, 500)
+			return
+		}
+		localProxy(c, link, file, storage.GetStorage().ProxyRange)
+		return
+	}
 	if canProxy(storage, filename) {
 		downProxyUrl := storage.GetStorage().DownProxyUrl
 		if downProxyUrl != "" {
 			_, ok := c.GetQuery("d")
 			if !ok {
-				URL := fmt.Sprintf("%s%s?sign=%s",
-					strings.Split(downProxyUrl, "\n")[0],
-					utils.EncodePath(rawPath, true),
-					sign.Sign(rawPath))
+				URL := common.BuildDownProxyURL(downProxyUrl, rawPath, storage.GetStorage().DownProxySign)
 				c.Redirect(302, URL)
 				return
 			}
@@ -129,37 +138,43 @@ func localProxy(c *gin.Context, link *model.Link, file model.Obj, proxyRange boo
 	if proxyRange {
 		common.ProxyRange(link, file.GetSize())
 	}
+	Writer := &common.WrittenResponseWriter{ResponseWriter: c.Writer}
 
 	//优先处理md文件
 	if utils.Ext(file.GetName()) == "md" && setting.GetBool(conf.FilterReadMeScripts) {
-		w := c.Writer
 		buf := bytes.NewBuffer(make([]byte, 0, file.GetSize()))
-		err = common.Proxy(&proxyResponseWriter{ResponseWriter: w, Writer: buf}, c.Request, link, file)
+		w := &common.InterceptResponseWriter{ResponseWriter: Writer, Writer: buf}
+		err = common.Proxy(w, c.Request, link, file)
 		if err == nil && buf.Len() > 0 {
-			if w.Status() < 200 || w.Status() > 300 {
-				w.Write(buf.Bytes())
+			if c.Writer.Status() < 200 || c.Writer.Status() > 300 {
+				c.Writer.Write(buf.Bytes())
 				return
 			}
 
 			var html bytes.Buffer
-			if err = goldmark.Convert(buf.Bytes(), &html); err != nil {
+			md := goldmark.New(goldmark.WithExtensions(extension.GFM))
+			if err = md.Convert(buf.Bytes(), &html); err != nil {
 				err = fmt.Errorf("markdown conversion failed: %w", err)
 			} else {
 				buf.Reset()
 				err = bluemonday.UGCPolicy().SanitizeReaderToWriter(&html, buf)
 				if err == nil {
-					w.Header().Set("Content-Length", strconv.FormatInt(int64(buf.Len()), 10))
-					w.Header().Set("Content-Type", "text/html; charset=utf-8")
-					_, err = utils.CopyWithBuffer(c.Writer, buf)
+					Writer.Header().Set("Content-Length", strconv.FormatInt(int64(buf.Len()), 10))
+					Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, err = utils.CopyWithBuffer(Writer, buf)
 				}
 			}
 		}
 	} else {
-		err = common.Proxy(c.Writer, c.Request, link, file)
+		err = common.Proxy(Writer, c.Request, link, file)
 	}
-	if err != nil {
-		common.ErrorResp(c, err, 500, true)
+	if err == nil {
 		return
+	}
+	if Writer.IsWritten() {
+		log.Errorf("%s %s local proxy error: %+v", c.Request.Method, c.Request.URL.Path, err)
+	} else {
+		common.ErrorResp(c, err, 500, true)
 	}
 }
 
@@ -174,6 +189,9 @@ func canProxy(storage driver.Driver, filename string) bool {
 	if storage.Config().MustProxy() || storage.GetStorage().WebProxy || storage.GetStorage().WebdavProxy() {
 		return true
 	}
+	if storage.GetStorage().Driver == "Quark" && utils.GetFileType(filename) == conf.VIDEO {
+		return true
+	}
 	if utils.SliceContains(conf.SlicesMap[conf.ProxyTypes], utils.Ext(filename)) {
 		return true
 	}
@@ -181,13 +199,4 @@ func canProxy(storage driver.Driver, filename string) bool {
 		return true
 	}
 	return false
-}
-
-type proxyResponseWriter struct {
-	http.ResponseWriter
-	io.Writer
-}
-
-func (pw *proxyResponseWriter) Write(p []byte) (int, error) {
-	return pw.Writer.Write(p)
 }

@@ -1,5 +1,5 @@
 <div align="center">
-  <a href="https://alist.nn.ci"><img width="100px" alt="logo" src="https://cdn.jsdelivr.net/gh/alist-org/logo@main/logo.svg"/></a>
+  <a href="https://alistgo.com"><img width="100px" alt="logo" src="https://cdn.jsdelivr.net/gh/alist-org/logo@main/logo.svg"/></a>
   <p><em>🗂️A file list program that supports multiple storages, powered by Gin and Solidjs.</em></p>
 <div>
   <a href="https://goreportcard.com/report/github.com/alist-org/alist/v3">
@@ -31,7 +31,7 @@
   <a href="https://hub.docker.com/r/xhofe/alist">
     <img src="https://img.shields.io/docker/pulls/xhofe/alist?color=%2348BB78&logo=docker&label=pulls" alt="Downloads" />
   </a>
-  <a href="https://alist.nn.ci/guide/sponsor.html">
+  <a href="https://alistgo.com/guide/sponsor.html">
     <img src="https://img.shields.io/badge/%24-sponsor-F87171.svg" alt="sponsor" />
   </a>
 </div>
@@ -57,7 +57,9 @@ English | [中文](./README_cn.md) | [日本語](./README_ja.md) | [Contributing
     - [x] [UPYUN Storage Service](https://www.upyun.com/products/file-storage)
     - [x] WebDav(Support OneDrive/SharePoint without API)
     - [x] Teambition([China](https://www.teambition.com/ ),[International](https://us.teambition.com/ ))
+    - [x] [MediaFire](https://www.mediafire.com)
     - [x] [Mediatrack](https://www.mediatrack.cn/)
+    - [x] [ProtonDrive](https://proton.me/drive)
     - [x] [139yun](https://yun.139.com/) (Personal, Family, Group)
     - [x] [YandexDisk](https://disk.yandex.com/)
     - [x] [BaiduNetdisk](http://pan.baidu.com/)
@@ -88,7 +90,7 @@ English | [中文](./README_cn.md) | [日本語](./README_ja.md) | [Contributing
 - [x] Dark mode
 - [x] I18n
 - [x] Protected routes (password protection and authentication)
-- [x] WebDav (see https://alist.nn.ci/guide/webdav.html for details)
+- [x] WebDav (see https://alistgo.com/guide/webdav.html for details)
 - [x] [Docker Deploy](https://hub.docker.com/r/xhofe/alist)
 - [x] Cloudflare Workers proxy
 - [x] File/Folder package download
@@ -101,6 +103,10 @@ English | [中文](./README_cn.md) | [日本語](./README_ja.md) | [Contributing
 
 <https://alistgo.com/>
 
+## API Documentation (via Apifox):
+
+<https://alist-public.apifox.cn/>
+
 ## Demo
 
 <https://al.nn.ci>
@@ -112,13 +118,11 @@ Please go to our [discussion forum](https://github.com/alist-org/alist/discussio
 ## Sponsor
 
 AList is an open-source software, if you happen to like this project and want me to keep going, please consider sponsoring me or providing a single donation! Thanks for all the love and support:
-https://alist.nn.ci/guide/sponsor.html
+https://alistgo.com/guide/sponsor.html
 
 ### Special sponsors
 
 - [VidHub](https://apps.apple.com/app/apple-store/id1659622164?pt=118612019&ct=alist&mt=8) - An elegant cloud video player within the Apple ecosystem. Support for iPhone, iPad, Mac, and Apple TV.
-- [亚洲云](https://www.asiayun.com/aff/QQCOOQKZ) - 高防服务器|服务器租用|福州高防|广东电信|香港服务器|美国服务器|海外服务器 - 国内靠谱的企业级云计算服务提供商 (sponsored Chinese API server)
-- [找资源](http://zhaoziyuan2.cc/) - 阿里云盘资源搜索引擎
 
 ## Contributors
 

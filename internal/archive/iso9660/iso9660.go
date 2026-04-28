@@ -1,14 +1,14 @@
 package iso9660
 
 import (
+	"io"
+	"os"
+
 	"github.com/alist-org/alist/v3/internal/archive/tool"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/stream"
 	"github.com/kdomanski/iso9660"
-	"io"
-	"os"
-	stdpath "path"
 )
 
 type ISO9660 struct {
@@ -78,7 +78,10 @@ func (ISO9660) Decompress(ss []*stream.SeekableStream, outputPath string, args m
 	}
 	if obj.IsDir() {
 		if args.InnerPath != "/" {
-			outputPath = stdpath.Join(outputPath, obj.Name())
+			outputPath, err = tool.SecureJoin(outputPath, obj.Name())
+			if err != nil {
+				return err
+			}
 			if err = os.MkdirAll(outputPath, 0700); err != nil {
 				return err
 			}

@@ -16,20 +16,52 @@ var userG singleflight.Group[*model.User]
 var guestUser *model.User
 var adminUser *model.User
 
+func enforceAdminUserDefaults(u *model.User) error {
+	if u == nil || !u.IsAdmin() {
+		return nil
+	}
+	changed := false
+	if utils.FixAndCleanPath(u.BasePath) != "/" {
+		u.BasePath = "/"
+		changed = true
+	}
+	if u.Permission != 0xFFFF {
+		u.Permission = 0xFFFF
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return db.UpdateUser(u)
+}
+
 func GetAdmin() (*model.User, error) {
 	if adminUser == nil {
-		user, err := db.GetUserByRole(model.ADMIN)
+		role, err := GetRoleByName("admin")
 		if err != nil {
 			return nil, err
 		}
+		user, err := db.GetUserByRole(int(role.ID))
+		if err != nil {
+			return nil, err
+		}
+		if err := enforceAdminUserDefaults(user); err != nil {
+			return nil, err
+		}
 		adminUser = user
+	} else if err := enforceAdminUserDefaults(adminUser); err != nil {
+		return nil, err
 	}
 	return adminUser, nil
 }
 
 func GetGuest() (*model.User, error) {
 	if guestUser == nil {
-		user, err := db.GetUserByRole(model.GUEST)
+		role, err := GetRoleByName("guest")
+		if err != nil {
+			return nil, err
+		}
+		user, err := db.GetUserByRole(int(role.ID))
 		if err != nil {
 			return nil, err
 		}
@@ -42,16 +74,26 @@ func GetUserByRole(role int) (*model.User, error) {
 	return db.GetUserByRole(role)
 }
 
+func GetUsersByRole(role int) ([]model.User, error) {
+	return db.GetUsersByRole(role)
+}
+
 func GetUserByName(username string) (*model.User, error) {
 	if username == "" {
 		return nil, errs.EmptyUsername
 	}
 	if user, ok := userCache.Get(username); ok {
+		if err := enforceAdminUserDefaults(user); err != nil {
+			return nil, err
+		}
 		return user, nil
 	}
 	user, err, _ := userG.Do(username, func() (*model.User, error) {
 		_user, err := db.GetUserByName(username)
 		if err != nil {
+			return nil, err
+		}
+		if err := enforceAdminUserDefaults(_user); err != nil {
 			return nil, err
 		}
 		userCache.Set(username, _user, cache.WithEx[*model.User](time.Hour))
@@ -70,7 +112,25 @@ func GetUsers(pageIndex, pageSize int) (users []model.User, count int64, err err
 
 func CreateUser(u *model.User) error {
 	u.BasePath = utils.FixAndCleanPath(u.BasePath)
-	return db.CreateUser(u)
+
+	err := db.CreateUser(u)
+	if err != nil {
+		return err
+	}
+
+	roles, err := GetRolesByUserID(u.ID)
+	if err == nil {
+		for _, role := range roles {
+			if len(role.PermissionScopes) > 0 {
+				u.BasePath = utils.FixAndCleanPath(role.PermissionScopes[0].Path)
+				break
+			}
+		}
+		_ = db.UpdateUser(u)
+		userCache.Del(u.Username)
+	}
+
+	return nil
 }
 
 func DeleteUserById(id uint) error {
@@ -98,6 +158,17 @@ func UpdateUser(u *model.User) error {
 	}
 	userCache.Del(old.Username)
 	u.BasePath = utils.FixAndCleanPath(u.BasePath)
+	//if len(u.Role) > 0 {
+	//	roles, err := GetRolesByUserID(u.ID)
+	//	if err == nil {
+	//		for _, role := range roles {
+	//			if len(role.PermissionScopes) > 0 {
+	//				u.BasePath = utils.FixAndCleanPath(role.PermissionScopes[0].Path)
+	//				break
+	//			}
+	//		}
+	//	}
+	//}
 	return db.UpdateUser(u)
 }
 
@@ -127,4 +198,12 @@ func DelUserCache(username string) error {
 	}
 	userCache.Del(username)
 	return nil
+}
+
+func CountEnabledAdminsExcluding(userID uint) (int64, error) {
+	adminRole, err := GetRoleByName("admin")
+	if err != nil {
+		return 0, err
+	}
+	return db.CountUsersByRoleAndEnabledExclude(adminRole.ID, userID)
 }
